@@ -50,6 +50,8 @@ class EastmoneySource(AnnouncementSource):
         return str(item.get('art_code') or hashlib.sha256(json.dumps(item,sort_keys=True,ensure_ascii=False).encode()).hexdigest())
 
     def _fetch_day(self, day):
+        from ..timeutil import today_cn
+        today_iso=today_cn().isoformat()
         result=DayResult(day,self.name)
         docs={}
         try:
@@ -64,7 +66,13 @@ class EastmoneySource(AnnouncementSource):
                 try:
                     data=first if p==1 else self._query(ANN_HOSTS[0],day,p)['data']
                     if int(data['total_hits'])!=total:
-                        errors.append('翻页期间源总数变化，需要重抓')
+                        # ★ 当天公告还在陆续发布，源总数本来就会变，这是正常现象。
+                        #   连它一起判失败的话，每天跑当天那一次必然 incomplete，
+                        #   于是永远不提交、网站永远不更新。只有历史日期才当真。
+                        if day >= today_iso:
+                            pass
+                        else:
+                            errors.append('翻页期间源总数变化，需要重抓')
                     if not data['list'] and total>0:
                         errors.append(f'第{p}页意外为空')
                         break

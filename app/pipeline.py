@@ -131,7 +131,12 @@ def _run_pipeline(mode,start,end,lookback_days,source,with_klines,planned_dates)
         codes={r['code'] for r in db.query("SELECT DISTINCT code FROM announcements WHERE category<>'other' AND is_noise=0 AND date>=?",(since,))}
         if with_klines:
             stats['klines'],price_errors,empty=_sync_klines(src,codes,_kline_target_end())
-            if price_errors: errors.append(f'K线 {len(price_errors)} 只失败: '+ '; '.join(price_errors[:5]))
+            # 少数股票拿不到行情是常态（个别代码所在板块源本身不通）。
+            # 不能因为几只失败就判整轮失败 —— 那等于永远不提交、网站永远不更新。
+            kline_limit=float(cfg.get('kline',{}).get('max_failure_ratio',0.2))
+            tolerated=max(20,int(kline_limit*len(codes)))
+            if price_errors and len(price_errors)>tolerated:
+                errors.append(f'K线 {len(price_errors)} 只失败（阈值 {tolerated}）: '+ '; '.join(price_errors[:5]))
             stats['kline_errors']=len(price_errors)
             stats['kline_empty']=len(empty)
         # 市值按 (code, date) 记账，与 K 线同一批股票、同样只在窗口内取。
