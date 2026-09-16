@@ -134,3 +134,127 @@ def build(site=None,days=90,reuse_klines=True):
                 'meta':payload['range'],'kline':kstats,'stocks':len(payload['items'])}
         finally:
             if stage.exists(): shutil.rmtree(stage)
+
+
+# ────────────────────── 站点固定化（2026-09-16 改造） ──────────────────────
+# 目标：站点外壳只生成一次；每轮只更新 docs/data/ 下的 JSON，浏览器运行时 fetch。
+#
+# 旧路径每轮重建整个 docs/（约 39MB）：data_list.js 2.66MB、16 个 K 线分片各 ~1MB，
+# 且每个产物还存一份内容哈希副本（体积翻倍）。数据每天只更新一次，
+# 没必要连 HTML/JS 一起重写。
+#
+# 破缓存：不再用内容哈希文件名，改用 Pages 实测的 max-age=600（10 分钟）。
+
+DATA_SUBDIR='data'
+
+# 固定层文件（不含 data/ 子树）
+SHELL_FILES=('index.html','dashboard.html','dashboard.js','lib/echarts.min.js','robots.txt','.nojekyll')
+
+
+def _write_json(path,value):
+    path=Path(path)
+    path.parent.mkdir(parents=True,exist_ok=True)
+    path.write_text(json.dumps(value,ensure_ascii=False,allow_nan=False,separators=(',',':')),encoding='utf-8')
+    return path.stat().st_size
+
+
+def _safe_shell(site):
+    """站点目录校验：只允许写站点目录本身，不允许碰源码与持久数据。"""
+    shell=Path(site).absolute()
+    if shell.is_symlink(): raise ValueError('站点目录不能是符号链接')
+    shell=shell.resolve()
+    repo=Path(BASE_DIR).resolve()
+    data=Path(data_dir()).resolve()
+    if shell==repo or shell in repo.parents or shell==data or shell in data.parents or data in shell.parents:
+        raise ValueError('站点目录不能覆盖源码或持久数据')
+    for protected in ('app','config','function','scripts','tools','web','tests'):
+        p=repo/protected
+        if shell==p or p in shell.parents: raise ValueError('站点目录不能位于源码子目录中')
+    return shell
+
+
+def build_shell(site=None):
+    """生成固定层。只在改前端（HTML/JS/CSS）时跑一次，日常更新不走这里。"""
+    target=_safe_shell(site or site_dir())
+    target.mkdir(parents=True,exist_ok=True)
+    html=(Path(web_dir())/'dashboard.html').read_text(encoding='utf-8')
+    html=re.sub(r'<title>.*?</title>',lambda _: '<title>'+html_lib.escape(site_title())+'</title>',html,count=1)
+    html=html.replace('<head>','<head>\n<meta name="robots" content="noindex,nofollow">',1)
+    _write(target/'index.html',html)
+    _write(target/'dashboard.html',html)
+    shutil.copyfile(Path(web_dir())/'dashboard.js',target/'dashboard.js')
+    lib_dst=target/'lib'
+    if lib_dst.exists(): shutil.rmtree(lib_dst)
+    shutil.copytree(Path(web_dir())/'lib',lib_dst)
+    _write(target/'robots.txt','User-agent: *\nDisallow: /\n')
+    _write(target/'.nojekyll','')
+    hashes={p.relative_to(target).as_posix():{'sha256':hashlib.sha256(p.read_bytes()).hexdigest(),'size':p.stat().st_size}
+        for p in sorted(target.rglob('*')) if p.is_file() and DATA_SUBDIR not in p.parts}
+    _write_json(target/'artifact.json',{'format':2,'kind':'shell',
+        'generated_at':board.now_cn().isoformat(),'files':hashes})
+    return {'ok':True,'kind':'shell','site':str(target),'files':len(hashes),
+        'bytes':sum(v['size'] for v in hashes.values())}
+
+
+def build_data(site=None,days=90):
+    """生成数据层 docs/data/*.json。这是每轮 cycle 唯一要跑的建站步骤。"""
+    shell=_safe_shell(site or site_dir())
+    shell.mkdir(parents=True,exist_ok=True)
+    target=shell/DATA_SUBDIR
+    with writer_lock():
+        db.init_db()
+        stage=Path(tempfile.mkdtemp(prefix='.board-data-',dir=shell))
+        try:
+            with db.transaction():
+                payload=board.build_payload(days)
+                bars=int(get_build_config().get('kline_bars',KLINE_BARS))
+                if not 6<=bars<=640: raise ValueError('build.kline_bars 必须在6到640之间')
+                kstats=_write_kline_json(stage,bars)
+                _write_json(stage/'stocks.json',payload['items'])
+                _write_json(stage/'taxonomy.json',payload.get('taxonomy',[]))
+                _write_json(stage/'kline_manifest.json',kstats['manifest'])
+                meta=dict(payload.get('meta',{}))
+                meta['range']=payload.get('range',{})
+                meta['kline_bars']=bars
+                meta['kline_shards']=KLINE_SHARDS
+                _write_json(stage/'meta.json',meta)
+            files={p.relative_to(stage).as_posix():{'sha256':hashlib.sha256(p.read_bytes()).hexdigest(),'size':p.stat().st_size}
+                for p in sorted(stage.rglob('*')) if p.is_file()}
+            _write_json(stage/'artifact.json',{'format':2,'kind':'data',
+                'generated_at':payload['meta']['generated_at'],'files':files,
+                'stocks':len(payload['items']),'source':payload['meta']['source'],'range':payload['range']})
+            backup=None
+            if target.exists():
+                backup=Path(tempfile.mkdtemp(prefix='.board-data-prev-',dir=shell))
+                backup.rmdir()
+                os.replace(target,backup)
+            try:
+                os.replace(stage,target)
+            except BaseException:
+                if backup is not None: os.replace(backup,target); backup=None
+                raise
+            if backup is not None: shutil.rmtree(backup)
+            return {'ok':True,'kind':'data','site':str(target),'files':len(files),
+                'bytes':sum(v['size'] for v in files.values()),'stocks':len(payload['items']),
+                'meta':payload['range'],'kline':kstats}
+        finally:
+            if stage.exists(): shutil.rmtree(stage)
+
+
+def _write_kline_json(stage,bars):
+    """K 线分片写成纯 JSON（浏览器 fetch），不再写成 window.ANNO_KLINE_SHARD_n = {...}。"""
+    buckets={i:{} for i in range(KLINE_SHARDS)}
+    rows=db.conn().execute('''SELECT code,date,open,close,high,low,volume FROM (
+        SELECT *, ROW_NUMBER() OVER(PARTITION BY code ORDER BY date DESC) rn
+        FROM current_klines) WHERE rn<=? ORDER BY code,date''',(bars,))
+    for row in rows:
+        buckets[shard_of(row['code'])].setdefault(row['code'],[]).append(
+            [row['date'],row['open'],row['close'],row['high'],row['low'],row['volume']])
+    files={}
+    total=0
+    for n,bucket in buckets.items():
+        name=f'kline_{n}.json'
+        total+=_write_json(Path(stage)/name,bucket)
+        files[str(n)]=name
+    manifest={'shards':KLINE_SHARDS,'codes':sum(len(b) for b in buckets.values()),'bars':bars,'files':files}
+    return {'manifest':manifest,'bytes':total}

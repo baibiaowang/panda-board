@@ -65,12 +65,14 @@ def run(repo_dir, *, mode='incremental', lookback_days=None, max_attempts=2, ret
                 'pushed': False, 'error': update.get('error'),
                 'reason': '采集未完整成功，保持 GitHub 旧版本'}
 
-    build = site.build(site_target, days)
+    # ★ 站点固定化改造（2026-09-16）：每轮只更新数据层 docs/data/*.json，
+    #   不再重建整个站点外壳。HTML/JS/CSS 由 `app.cli build-shell` 一次性生成后固定。
+    build = site.build_data(site_target, days)
     steps['build'] = build
     if not build.get('ok'):
         return {'ok': False, 'stage': 'build', 'version': version, 'steps': steps,
                 'pushed': False, 'error': build.get('error'),
-                'reason': '建站失败，保持 GitHub 旧版本'}
+                'reason': '数据层生成失败，保持 GitHub 旧版本'}
 
     check = validator.check_data(days)
     steps['check'] = check

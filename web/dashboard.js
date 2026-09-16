@@ -1,15 +1,17 @@
 'use strict';
+/* 站点固定化（2026-09-16 改造）
+   数据不再内嵌为 window.ANNO_* 全局变量，改为运行时 fetch docs/data/*.json。
+   这样每轮更新只需替换 data/ 下的文件，HTML/JS 外壳保持不变。
+   注意：不再依赖 window.ANNO_LIST 等全局变量，初始化改由 boot() 异步驱动。 */
 const RED = '#e6343a', GREEN = '#0aa858';
-const all = Array.isArray(window.ANNO_LIST) ? window.ANNO_LIST : [];
-const meta = window.ANNO_META || {};
-const manifest = window.ANNO_KLINE_SHARDS || {};
-const taxonomy = window.ANNO_TAXONOMY || [];
-const byCode = new Map(all.map(s => [s.code, s]));
-const colorByLabel = Object.fromEntries(taxonomy.map(t => [t.label, /^#[0-9a-f]{6}$/i.test(t.color || '') ? t.color : '#6b7280']));
-let activeCat = all.some(s => (s.announcements || []).some(a => a.category === '并购重组')) ? '并购重组' : '全部';
-let activeBoard = '主板', showST = false, activeRange = '3d', activeCode = null, chart = null;
+const DATA_DIR = 'data/';
+const ECHARTS_URL = 'lib/echarts.min.js';
+
+let all = [], meta = {}, manifest = {}, taxonomy = [];
+let byCode = new Map(), colorByLabel = {};
+let activeCat = '全部', activeBoard = '主板', showST = false, activeRange = '3d', activeCode = null, chart = null;
 let visible = [], generation = 0;
-const scriptLoads = new Map();
+
 const $ = id => document.getElementById(id);
 const esc = v => String(v ?? '').replace(/[&<>"']/g, x => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[x]));
 const known = v => typeof v === 'number' && Number.isFinite(v);
@@ -17,6 +19,19 @@ const fmt = v => known(v) ? (v >= 0 ? '+' : '') + v.toFixed(2) + '%' : '—';
 const cls = v => !known(v) ? '' : v >= 0 ? 'up' : 'down';
 const fmtMv = v => known(v) && v > 0 ? (v >= 1e12 ? (v / 1e12).toFixed(2) + '万亿' : (v / 1e8).toFixed(1) + '亿') : '';
 const todayCN = () => new Date(Date.now() + 8 * 3600000).toISOString().slice(0,10);
+
+const jsonLoads = new Map();
+function loadJSON(path) {
+  if (jsonLoads.has(path)) return jsonLoads.get(path);
+  const task = fetch(path, {cache: 'no-cache'}).then(res => {
+    if (!res.ok) throw new Error('加载 ' + path + ' 失败（HTTP ' + res.status + '）');
+    return res.json();
+  });
+  jsonLoads.set(path, task);
+  task.catch(() => jsonLoads.delete(path));
+  return task;
+}
+
 function cutoff(n, end = todayCN()) {
   return new Date(Date.parse(end + 'T00:00:00Z') - (n-1)*86400000).toISOString().slice(0,10);
 }
@@ -82,9 +97,10 @@ function renderList() {
 function safeLink(url) {
   try {const u=new URL(url);return u.protocol==='https:' ? u.href : '';} catch (_) {return '';}
 }
+const scriptLoads = new Map();
 function loadScript(url, ready) {
   if (ready()) return Promise.resolve();
-  // Only same-build relative assets from the generated manifest may execute.
+  // Only same-build relative assets may execute.
   if (!/^[a-zA-Z0-9_./-]+\.js$/.test(url || '') || url.startsWith('/') || url.includes('..')) return Promise.reject(new Error('资源路径无效'));
   if (scriptLoads.has(url)) return scriptLoads.get(url);
   const task=new Promise((resolve,reject)=>{
@@ -97,6 +113,16 @@ function loadScript(url, ready) {
   });
   scriptLoads.set(url,task);
   task.catch(()=>scriptLoads.delete(url));
+  return task;
+}
+const klineLoads = new Map();
+function loadKline(shard) {
+  const file = (manifest.files || {})[shard];
+  if (!file) return Promise.reject(new Error('缺少 K 线分片 ' + shard));
+  if (klineLoads.has(shard)) return klineLoads.get(shard);
+  const task = loadJSON(DATA_DIR + file);
+  klineLoads.set(shard, task);
+  task.catch(() => klineLoads.delete(shard));
   return task;
 }
 function select(code) {
@@ -115,13 +141,13 @@ function select(code) {
   $('p_anns').style.display='block';
   clearChart('K线加载中…');
   const sh=String(Number(code)%(manifest.shards || 16));
-  loadScript((manifest.files || {})[sh],()=>Object.prototype.hasOwnProperty.call(window,'ANNO_KLINE_SHARD_'+sh))
-    .then(()=>{
+  loadKline(sh)
+    .then(kline=>{
       if(token!==generation)return;
-      const k=(window['ANNO_KLINE_SHARD_'+sh] || {})[code] || [];
+      const k=(kline || {})[code] || [];
       if(!k.length){clearChart('该股票暂无可用K线；请检查行情日期与采集记录');return;}
       $('p_px').textContent=k.at(-1)[2].toFixed(2);
-      return loadScript(meta.echarts_url,()=>!!window.echarts).then(()=>{if(token===generation)drawChart(s,k,anns);});
+      return loadScript(ECHARTS_URL,()=>!!window.echarts).then(()=>{if(token===generation)drawChart(s,k,anns);});
     }).catch(error=>{if(token===generation)clearChart(error.message+'，请刷新页面或重试',()=>select(code));});
 }
 function announcementPoints(anns,dates) {
@@ -161,7 +187,8 @@ function renderQuality() {
   const cov=meta.coverage || {},run=meta.run || {};
   $('header_sub').textContent=`公告窗口 ${(cov.window || {}).start || '—'} ～ ${(cov.window || {}).end || '—'} · 更新 ${meta.generated_at || '未知'} · ${all.length} 只股票`;
   const messages=[];
-  if(!window.ANNO_LIST || !window.ANNO_META || !window.ANNO_KLINE_SHARDS)messages.push('数据文件未完整加载，请刷新页面');
+  // 固定化改造后不再有 window.ANNO_* 全局变量，用实际加载结果判断完整性。
+  if(!all.length || !meta.generated_at || !manifest.shards)messages.push('数据文件未完整加载，请刷新页面');
   if(meta.mock)messages.push('模拟数据演示，非真实行情');
   if(meta.generated_at && meta.generated_at.slice(0,10)<todayCN())messages.push('页面未在北京时间今天更新');
   messages.push(`来源 ${meta.source || '未知'}；逐日分页校验 ${cov.covered_days ?? 0}/${(cov.window || {}).days || '—'} 天；未抓取 ${(cov.missing_days || []).length} 天；不完整 ${(cov.incomplete_days || []).length} 天`);
@@ -169,13 +196,39 @@ function renderQuality() {
   messages.push('分类为标题规则匹配；参考市值取首次成功值。分页校验不代表交易所全覆盖。');
   $('quality').textContent=messages.join(' · ');
 }
-renderQuality();renderFilters();
-let searchTimer;
-$('search').addEventListener('input',()=>{clearTimeout(searchTimer);searchTimer=setTimeout(renderList,150);});
-$('boards').onchange=e=>{activeBoard=e.target.value;renderList();};
-$('stswitch').onchange=e=>{showST=e.target.checked;renderList();};
-$('dranges').onchange=e=>{activeRange=e.target.value;renderList();};
-window.addEventListener('resize',()=>{if(chart)chart.resize();});
-const requested=new URLSearchParams(location.search).get('stock');
-if(byCode.has(requested)){activeCode=requested;activeBoard='全部板块';activeCat='全部';activeRange='';showST=true;$('stswitch').checked=true;renderFilters();}
-renderList();
+function bindEvents() {
+  let searchTimer;
+  $('search').addEventListener('input',()=>{clearTimeout(searchTimer);searchTimer=setTimeout(renderList,150);});
+  $('boards').onchange=e=>{activeBoard=e.target.value;renderList();};
+  $('stswitch').onchange=e=>{showST=e.target.checked;renderList();};
+  $('dranges').onchange=e=>{activeRange=e.target.value;renderList();};
+  window.addEventListener('resize',()=>{if(chart)chart.resize();});
+}
+async function boot() {
+  try {
+    const [stocks,metaJson,tax,km] = await Promise.all([
+      loadJSON(DATA_DIR + 'stocks.json'),
+      loadJSON(DATA_DIR + 'meta.json'),
+      loadJSON(DATA_DIR + 'taxonomy.json'),
+      loadJSON(DATA_DIR + 'kline_manifest.json'),
+    ]);
+    all = Array.isArray(stocks) ? stocks : [];
+    meta = metaJson || {};
+    taxonomy = Array.isArray(tax) ? tax : [];
+    manifest = km || {};
+    byCode = new Map(all.map(s => [s.code, s]));
+    colorByLabel = Object.fromEntries(taxonomy.map(t => [t.label, /^#[0-9a-f]{6}$/i.test(t.color || '') ? t.color : '#6b7280']));
+    activeCat = all.some(s => (s.announcements || []).some(a => a.category === '并购重组')) ? '并购重组' : '全部';
+    const requested = new URLSearchParams(location.search).get('stock');
+    if (byCode.has(requested)) {activeCode=requested;activeBoard='全部板块';activeCat='全部';activeRange='';showST=true;$('stswitch').checked=true;}
+    renderQuality();
+    renderFilters();
+    bindEvents();
+    renderList();
+  } catch (error) {
+    $('header_sub').textContent = '数据加载失败';
+    $('quality').textContent = '数据加载失败：' + error.message;
+    $('list').innerHTML = `<div class="empty">数据加载失败<br>${esc(error.message)}</div>`;
+  }
+}
+boot();

@@ -129,3 +129,116 @@ def check_data(days=90):
     failed = [c for c in checks if not c['ok']]
     return {'ok': not failed, 'checks': checks,
             'error': '; '.join(f"{c['name']}: {c['detail']}" for c in failed) or None}
+
+
+# ────────────────────── 站点固定化校验（2026-09-16 改造） ──────────────────────
+# 新架构把产物拆成两层，各自独立一份 artifact.json（format=2，用 kind 区分）：
+#   · 固定层（站点根）：index.html / dashboard.html / dashboard.js / lib/echarts.min.js
+#                       / robots.txt / .nojekyll                —— 只在改前端时重建
+#   · 数据层（站点根/data）：stocks.json / taxonomy.json / meta.json
+#                       / kline_manifest.json / kline_0..15.json —— 每轮 cycle 重建
+# 两层互不覆盖。上面那份旧的 verify_artifact() 要求"目录内容恰好等于清单"，
+# 在新架构下必然不成立，但它仍是旧 build() 的守门人，故保留不动。
+
+DATA_SUBDIR = 'data'
+SHELL_REQUIRED = ('index.html', 'dashboard.html', 'dashboard.js',
+                  'lib/echarts.min.js', 'robots.txt', '.nojekyll')
+DATA_REQUIRED = ('stocks.json', 'taxonomy.json', 'meta.json', 'kline_manifest.json')
+
+
+def _read_json(path):
+    return json.loads(Path(path).read_text(encoding='utf-8'))
+
+
+def _iter_tree(root, exclude=()):
+    """遍历 root 下所有条目，跳过 exclude 里的一级子目录（固定层要跳过 data/）。"""
+    for p in root.rglob('*'):
+        rel = p.relative_to(root)
+        if rel.parts and rel.parts[0] in exclude:
+            continue
+        yield p, rel
+
+
+def _verify_manifest(root, kind, required, exclude=()):
+    """两层共用的清单核对：格式 → 必需文件 → 符号链接 → 文件全集 → 逐文件 sha256。"""
+    manifest = _read_json(root / 'artifact.json')
+    files = manifest.get('files')
+    if manifest.get('format') != 2 or manifest.get('kind') != kind or not isinstance(files, dict):
+        raise ValueError(f'{kind} 产物清单无效')
+    missing = [n for n in required if n not in files]
+    if missing:
+        raise ValueError(f'{kind} 产物缺少必需文件: {",".join(missing)}')
+    if root.is_symlink() or any(p.is_symlink() for p, _ in _iter_tree(root, exclude)):
+        raise ValueError('产物不能包含符号链接')
+    actual = {rel.as_posix() for p, rel in _iter_tree(root, exclude) if p.is_file()}
+    if actual != set(files) | {'artifact.json'}:
+        raise ValueError(f'{kind} 产物文件列表不匹配')
+    for name, expected in files.items():
+        p = root / name
+        if not p.resolve().is_relative_to(root.resolve()):
+            raise ValueError('产物路径越界')
+        if p.stat().st_size != expected['size'] or \
+                hashlib.sha256(p.read_bytes()).hexdigest() != expected['sha256']:
+            raise ValueError(f'产物损坏: {name}')
+    return manifest, files, actual
+
+
+def verify_shell(site):
+    """校验固定层。只在跑过 build-shell 之后用一次，日常 cycle 不碰它。"""
+    root = Path(site)
+    try:
+        _manifest, files, actual = _verify_manifest(root, 'shell', SHELL_REQUIRED,
+                                                    exclude=(DATA_SUBDIR,))
+        index, dash = root / 'index.html', root / 'dashboard.html'
+        if index.stat().st_size < 2000:
+            raise ValueError('首页异常短，可能构建失败')
+        if index.read_bytes() != dash.read_bytes():
+            raise ValueError('index.html 与 dashboard.html 不一致')
+        return {'ok': True, 'kind': 'shell', 'files': len(actual),
+                'bytes': sum(v['size'] for v in files.values())}
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return {'ok': False, 'kind': 'shell', 'error': str(exc)}
+
+
+def verify_data(site):
+    """校验数据层 docs/data/。这是每轮 push 之前的最后一道门。"""
+    root = Path(site) / DATA_SUBDIR
+    try:
+        manifest, files, actual = _verify_manifest(root, 'data', DATA_REQUIRED)
+
+        stocks = _read_json(root / 'stocks.json')
+        if not isinstance(stocks, list) or not stocks:
+            raise ValueError('公告数据为空或格式无效')
+        if len(stocks) != manifest['stocks']:
+            raise ValueError('公告股票数量不匹配')
+
+        meta = _read_json(root / 'meta.json')
+        if not isinstance(meta, dict) or not meta.get('generated_at') or not meta.get('source'):
+            raise ValueError('meta.json 缺少 generated_at/source')
+        if meta.get('kline_shards') != KLINE_SHARDS:
+            raise ValueError('meta.json 的 kline_shards 与常量不一致')
+
+        km = _read_json(root / 'kline_manifest.json')
+        if not isinstance(km, dict) or km.get('shards') != KLINE_SHARDS \
+                or len(km.get('files', {})) != KLINE_SHARDS:
+            raise ValueError('K线分片清单无效')
+        bars, codes = km.get('bars'), 0
+        for n in range(KLINE_SHARDS):
+            name = km['files'].get(str(n))
+            if name not in files:
+                raise ValueError('缺少K线分片')
+            bucket = _read_json(root / name)
+            if not isinstance(bucket, dict):
+                raise ValueError('K线分片格式无效')
+            for series in bucket.values():
+                if not isinstance(series, list) or (bars and len(series) > bars):
+                    raise ValueError('K线分片格式无效')
+            codes += len(bucket)
+        if codes != km.get('codes'):
+            raise ValueError('K线代码数与清单不符')
+
+        return {'ok': True, 'kind': 'data', 'files': len(actual),
+                'bytes': sum(v['size'] for v in files.values()),
+                'stocks': len(stocks), 'codes': codes}
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return {'ok': False, 'kind': 'data', 'error': str(exc)}

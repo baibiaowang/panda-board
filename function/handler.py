@@ -116,9 +116,34 @@ def handler(event=None):
         'ttl_seconds': ttl,
         'metadata': {'role': 'panda-board-update'},
     }, timeout=60)
-    sid = resource_id(created.get('id', ''))
+    # ★ 沙箱从这一刻起已经存在，之后无论发生什么都必须尝试清理。
+    #   旧版把 resource_id() 放在 try 之外：返回结构里一旦没有合法 id，
+    #   resource_id 抛 ValueError → finally 不执行 → 沙箱泄漏。
+    #   （2026-09-16 真实泄漏事故后定位到这处结构隐患）
+    raw_id = ''
+    for key in ('id', 'sandbox_id'):
+        val = created.get(key)
+        if isinstance(val, str) and val.strip():
+            raw_id = val.strip()
+            break
+    if not raw_id:
+        inner = created.get('sandbox')
+        if isinstance(inner, dict) and isinstance(inner.get('id'), str):
+            raw_id = inner['id'].strip()
+
+    sid = ''
+    try:
+        sid = resource_id(raw_id)
+    except ValueError:
+        # 解析不出来也要留下线索，别让沙箱无声泄漏
+        print('sandbox id 解析失败 raw=%r keys=%s'
+              % (raw_id[:60], sorted(created.keys())), flush=True)
 
     try:
+        if not sid:
+            return {'ok': False, 'completed': False,
+                    'error': '平台未返回可解析的沙箱 ID，任务未开始',
+                    'response_keys': sorted(created.keys())}
         api.write_file(sid, '/workspace/github-token', cfg['token'].encode())
         api.write_file(sid, '/workspace/run-update.sh', run_script(cfg).encode())
         # 点火即返回。发完用 pgrep 复核，"发出命令"不等于"跑起来了"。
@@ -152,11 +177,18 @@ def handler(event=None):
                 'log_tail': _tail(api, sid)}
     finally:
         # 沙箱用完必须显式删 —— TTL 只是第二道防线。
-        try:
-            api.call('DELETE', f'/v1/sandboxes/{sid}', timeout=60)
-        except Exception as exc:
-            # 清理失败不能盖掉任务本身的返回结果。
-            print('sandbox cleanup failed:', type(exc).__name__, flush=True)
+        # sid 解析失败时退回平台返回的原始 id（仅接受纯 [A-Za-z0-9_-]，避免拼出畸形 URL）。
+        target = sid
+        if not target and raw_id and all(c.isalnum() or c in '_-' for c in raw_id):
+            target = raw_id
+        if target:
+            try:
+                api.call('DELETE', f'/v1/sandboxes/{target}', timeout=60)
+            except Exception as exc:
+                # 清理失败不能盖掉任务本身的返回结果。
+                print('sandbox cleanup failed:', type(exc).__name__, flush=True)
+        else:
+            print('sandbox 未清理：未取得任何可用 ID，只能依赖 TTL', flush=True)
 
 
 if __name__ == '__main__':

@@ -52,6 +52,32 @@ def cmd_build(args):
     return site.build(args.site or paths.site_dir(),args.days)
 
 
+def cmd_build_shell(args):
+    """生成站点固定层（HTML/JS/CSS）。只在改前端时手动跑一次，日常 cycle 不碰。"""
+    from .validator import verify_shell
+    target=args.site or paths.site_dir()
+    result=site.build_shell(target)
+    if result.get('ok'):
+        checked=verify_shell(target)
+        result['verify']=checked
+        if not checked['ok']:
+            return {'ok':False,'kind':'shell','error':checked['error'],'site':result.get('site')}
+    return result
+
+
+def cmd_build_data(args):
+    """生成数据层 docs/data/*.json。这是每轮 cycle 唯一要跑的建站步骤。"""
+    from .validator import verify_data
+    target=args.site or paths.site_dir()
+    result=site.build_data(target,args.days)
+    if result.get('ok'):
+        checked=verify_data(target)
+        result['verify']=checked
+        if not checked['ok']:
+            return {'ok':False,'kind':'data','error':checked['error'],'site':result.get('site')}
+    return result
+
+
 def cmd_validate(args):
     from .validator import check_data
     result=check_data(args.days)
@@ -91,14 +117,17 @@ def main(argv=None):
     p=sub.add_parser('gaps');p.add_argument('--days',type=int,default=90)
     p.add_argument('--thin-below',type=int,default=5);p.set_defaults(fn=cmd_gaps)
     p=sub.add_parser('validate');p.add_argument('--days',type=int,default=90);p.set_defaults(fn=cmd_validate)
-    for cmd,fn in [('run',cmd_run),('build',cmd_build),('cycle',cmd_cycle)]:
+    for cmd,fn in [('run',cmd_run),('build',cmd_build),('cycle',cmd_cycle),
+                   ('build-shell',cmd_build_shell),('build-data',cmd_build_data)]:
         p=sub.add_parser(cmd);p.set_defaults(fn=fn)
         if cmd in ('run','cycle'):
             p.add_argument('--mode',choices=['incremental','full'],default='incremental')
             p.add_argument('--start');p.add_argument('--end');p.add_argument('--lookback-days',type=int)
             p.add_argument('--max-attempts',type=int,default=2);p.add_argument('--retry-delay',type=int,default=10)
-        if cmd=='build':
-            p.add_argument('--days',type=int,default=90);p.add_argument('--site')
+        if cmd in ('build','build-data'):
+            p.add_argument('--days',type=int,default=90)
+        if cmd in ('build','build-shell','build-data'):
+            p.add_argument('--site')
         if cmd=='cycle':
             p.add_argument('--data-repo',required=True,help='数据仓库的本地目录')
             p.add_argument('--repo');p.add_argument('--token');p.add_argument('--branch',default='main')
