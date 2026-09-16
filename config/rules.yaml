@@ -1,0 +1,388 @@
+# 公告全部保留入库；noise 只影响展示，风险公告优先保留。
+# market_cap.cache_days=0 保留原项目的参考市值不定期刷新口径。
+# kline.days 和 build.kline_bars 均为交易日K线根数。
+version: 3
+classify:
+  multi_label: false
+  default_category: other
+  match_fields:
+  - title
+  - summary
+taxonomy:
+- id: delisting
+  label: 退市风险
+  short: 退市
+  icon: ⚠️
+  order: 1
+  priority: 100
+  enabled: true
+  risk: true
+  display_color: '#dc2626'
+  keywords:
+  - 退市
+  - 退市风险
+  - 终止上市
+  - 面值退市
+  - 财务类退市
+  - 规范类退市
+  - 暂停上市
+  - 风险警示
+  - 可能被实施退市风险警示
+  - 撤销退市风险警示
+  - 股票可能被终止上市
+  patterns:
+  - 退市风险警示
+  - 终止上市
+  min_amount: null
+- id: restructuring
+  label: 破产重整
+  short: 重整
+  icon: 🏗️
+  order: 2
+  priority: 95
+  enabled: true
+  risk: true
+  display_color: '#7c2d12'
+  keywords:
+  - 重整
+  - 破产
+  - 破产重整
+  - 破产清算
+  - 预重整
+  - 重整计划
+  - 重整申请
+  - 债务重组
+  - 管理人
+  patterns:
+  - 重整(计划|申请|受理)
+  - 预重整
+  min_amount: null
+- id: penalty
+  label: 立案/处罚
+  short: 立案处罚
+  icon: 🔴
+  order: 3
+  priority: 90
+  enabled: true
+  risk: true
+  display_color: '#dc2626'
+  keywords:
+  - 立案
+  - 立案调查
+  - 立案告知
+  - 调查
+  - 处罚
+  - 行政处罚
+  - 警示函
+  - 监管函
+  - 监管措施
+  - 处分
+  - 纪律处分
+  - 通报批评
+  - 违规
+  - 违规担保
+  patterns:
+  - 立案(调查|告知)
+  - 行政处罚
+  - 监管(措施|函)
+  - 警示函
+  min_amount: null
+- id: lawsuit
+  label: 重大诉讼
+  short: 诉讼
+  icon: ⚖️
+  order: 4
+  priority: 85
+  enabled: true
+  risk: true
+  display_color: '#b91c1c'
+  keywords:
+  - 诉讼
+  - 仲裁
+  - 起诉
+  - 被诉
+  - 判决
+  - 重大诉讼
+  - 重大仲裁
+  - 诉讼进展
+  patterns:
+  - (重大)?(诉讼|仲裁)
+  - (起诉|被诉|判决)
+  min_amount: null
+- id: clarify
+  label: 澄清/辟谣
+  short: 澄清
+  icon: 🚫
+  order: 5
+  priority: 88
+  enabled: true
+  risk: false
+  display_color: '#db2777'
+  keywords:
+  - 澄清
+  - 辟谣
+  - 严正声明
+  - 不实信息
+  - 虚假信息
+  - 谣言
+  - 误导性陈述
+  patterns:
+  - 澄清(公告|声明|说明)
+  - (澄清|严正).{0,10}(声明|公告|说明)
+  - (传闻|传言|媒体报道|网络传言|市场传闻|媒体传闻).{0,30}(澄清|核实|不实|虚假|否认|回应|说明|声明)
+  - (不实|虚假|误导性).{0,10}(报道|信息|传闻|陈述|言论)
+  min_amount: null
+- id: merger
+  label: 并购重组
+  short: 并购
+  icon: 💰
+  order: 5
+  priority: 80
+  enabled: true
+  display_color: '#2563eb'
+  keywords:
+  - 并购重组
+  - 重大资产重组
+  - 发行股份购买
+  - 购买资产
+  - 吸收合并
+  - 收购
+  - 取得控制
+  - 控制权变更
+  - 要约收购
+  - 重组报告书
+  - 重组预案
+  - 重组草案
+  - 重大资产购买
+  - 重大资产出售
+  patterns:
+  - (重大资产|发行股份)(购买|出售|置换|重组)
+  - 收购.{0,15}(股权|资产)
+  - 控制权(变更|转让)
+  min_amount: null
+- id: disposal
+  label: 出售/转让
+  short: 出售转让
+  icon: 📦
+  order: 6
+  priority: 70
+  enabled: true
+  display_color: '#7c3aed'
+  keywords:
+  - 出售
+  - 转让
+  - 剥离
+  - 挂牌
+  - 清仓
+  - 股权转让
+  - 资产处置
+  - 出售子公司
+  - 公开挂牌
+  patterns:
+  - (出售|转让).{0,12}(股权|资产|子公司)
+  min_amount: null
+- id: pledge
+  label: 质押/解押
+  short: 质押
+  icon: 🔒
+  order: 7
+  priority: 60
+  enabled: true
+  display_color: '#0891b2'
+  keywords:
+  - 质押
+  - 解押
+  - 解除质押
+  - 再质押
+  - 股份质押
+  - 股份解押
+  - 质押式回购
+  - 补充质押
+  - 质押展期
+  - 冻结
+  patterns:
+  - (质押|解押|解除质押)
+  min_amount: 50000000
+- id: forecast
+  label: 业绩预告
+  short: 业绩
+  icon: 📊
+  order: 8
+  priority: 50
+  enabled: true
+  display_color: '#059669'
+  keywords:
+  - 业绩预告
+  - 业绩快报
+  - 预增
+  - 预减
+  - 预亏
+  - 扭亏
+  - 业绩变脸
+  - 大幅增长
+  - 大幅下降
+  - 半年度业绩
+  - 前三季度业绩
+  - 年度业绩
+  patterns:
+  - 业绩(预告|快报|预增|预减|预亏|扭亏|变脸)
+  min_amount: null
+- id: dividend
+  label: 分红/增持/回购
+  short: 分红回购
+  icon: 💵
+  order: 9
+  priority: 40
+  enabled: true
+  display_color: '#ca8a04'
+  keywords:
+  - 分红
+  - 派现
+  - 送转
+  - 增持
+  - 回购
+  - 利润分配
+  - 权益分派
+  - 派息
+  - 股份回购
+  - 回购股份
+  - 回购报告书
+  patterns:
+  - (利润|权益)分(配|派)
+  - 回购(股份|报告书)
+  - 增持.{0,8}(计划|进展)
+  min_amount: null
+- id: personnel
+  label: 人事变动
+  short: 人事
+  icon: 👤
+  order: 10
+  priority: 30
+  enabled: true
+  display_color: '#d97706'
+  keywords:
+  - 董事长
+  - 总经理
+  - 辞职
+  - 辞任
+  - 离任
+  - 更换
+  - 聘任
+  - 选举
+  - 董事长变更
+  - 总经理变更
+  - 独立董事辞职
+  - 法定代表人
+  - 高管变动
+  patterns:
+  - (董事长|总经理|董事|监事|高管).{0,10}(辞职|离任|变更|聘任|选举)
+  min_amount: null
+- id: other
+  label: 其他公告
+  short: 其他
+  icon: 📄
+  order: 99
+  priority: 0
+  enabled: true
+  display_color: '#6b7280'
+  keywords: []
+  patterns: []
+  min_amount: null
+noise:
+  enabled: true
+  titles:
+  - 限制性股票
+  - 回购注销
+  - 回购价格
+  - 行权价格
+  - 法律意见书
+  - 前十大股东
+  - 债券
+  - 兑付
+  - 摘牌
+  - 员工持股计划
+  - 股本变动
+  - 减少注册资本
+  - 通知债权人
+  - 审计报告
+  - 业绩承诺补偿
+  - 独立董事
+  - 证券事务代表
+  - 监事
+  - 工作细则
+  - 回购进展
+  - 回购实施结果
+  - 回购股份事项
+  - 回购完成
+  - 章程
+  - 议事规则
+  - 管理制度
+  - 修正案
+  pledge_whitelist:
+  - 控股股东
+  - 第一大股东
+  - 5%以上股东
+  - 解除质押
+  - 解押
+numeric_extraction:
+  money:
+  - (?<![\d,.])([\d,]+(?:\.\d+)?)\s*亿元
+  - (?<![\d,.])([\d,]+(?:\.\d+)?)\s*万元
+  - (?<![\d,.])([\d,]+(?:\.\d+)?)\s*元
+  percent:
+  - (\d+(?:\.\d+)?)\s*%
+  share:
+  - (\d+(?:\.\d+)?)\s*万股
+  - (\d+(?:\.\d+)?)\s*亿股
+  max_items: 4
+fetch:
+  source: eastmoney
+  mock:
+    seed: 20260828
+    pool_size: 800
+    ann_per_day: 150
+    kline_days: 160
+  cninfo:
+    columns:
+    - sse
+    - szse
+    workers: 4
+    max_pages_per_day: 1000
+  kline:
+    days: 160
+    eastmoney_first: false
+    workers: 8
+    nodata_retry_days: 1
+  market_cap:
+    enabled: true
+    cache_days: 0
+    batch_size: 60
+    workers: 4
+  eastmoney:
+    page_size: 100
+    max_pages_per_day: 120
+    ann_type: A
+    sleep: 0.35
+    probe_workers: 4
+    day_workers: 4
+  scan_days: 90
+  days_per_run: 12
+  lookback_days: 2
+network:
+  timezone: Asia/Shanghai
+  connect_timeout: 10
+  read_timeout: 25
+  max_attempts: 3
+  backoff_base: 2.0
+  user_agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
+    like Gecko) Chrome/126.0 Safari/537.36
+  proxy: null
+  proxy_env_fallback: true
+  verify_ssl: true
+  conn_pool_size: 8
+  allow_http_fallback: false
+  max_response_bytes: 16777216
+display:
+  max_announcements_per_stock: 0
+build:
+  kline_bars: 120

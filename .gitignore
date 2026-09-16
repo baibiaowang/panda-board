@@ -1,0 +1,44 @@
+# 本地工作目录：临时 SQLite 落在 data/ 或 work/，沙箱销毁即消失，绝不进 git。
+# 长期存储是 GitHub 的 panda-board-data 数据仓库，不是这里。
+data/
+work/
+
+# 静态产物：每次跑完推走，不需要留在仓库里
+dist/
+_out/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 本地临时
+*.tmp
+*.log
+!scripts/*.log
+
+# 本地端到端验证用的临时工作区（库副本 + 产物）
+_e2e/
+
+# Never commit credentials, job state or live databases.
+.env
+*.env
+*.db
+*.db-wal
+*.db-shm
+*.sqlite*
+*.key
+*.pem
+id_deploy*
+_secrets/
+backups/
+jobs/
+test-results/

@@ -1,0 +1,6 @@
+# Core runtime, tested with Python 3.12. Requires Python >= 3.10 and SQLite >= 3.25.
+PyYAML==6.0.3
+tzdata==2026.3
+
+# Optional deployment workstation only: official `pandastack` Python SDK.
+# It is not needed by the worker or Function runtime; see docs/DEPLOYMENT.md.

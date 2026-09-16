@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>A股公告看板</title>
+<style>
+  :root {
+    --bg: #f5f6fa;
+    --card: #ffffff;
+    --border: #e6e8ef;
+    --text: #1f2430;
+    --text2: #6b7280;
+    --red: #e6343a;
+    --green: #0aa858;
+    --accent: #2563eb;
+    --shadow: 0 1px 3px rgba(0,0,0,.06), 0 1px 2px rgba(0,0,0,.04);
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background:var(--bg); color:var(--text); }
+  .header {
+    background:linear-gradient(135deg,#1e3a8a,#2563eb 60%,#3b82f6);
+    color:#fff; padding:20px 28px; display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:12px;
+  }
+  .header h1 { font-size:22px; font-weight:700; }
+  .header .sub { font-size:13px; opacity:.85; margin-top:4px; }
+  .stats { display:flex; gap:16px; }
+  .stat { background:rgba(255,255,255,.14); border-radius:10px; padding:8px 16px; text-align:center; min-width:76px; }
+  .stat .n { font-size:20px; font-weight:700; }
+  .stat .l { font-size:11px; opacity:.8; }
+  .toolbar { padding:14px 24px; display:flex; gap:10px; align-items:center; flex-wrap:wrap; background:var(--card); border-bottom:1px solid var(--border); }
+  .search { flex:1; min-width:200px; max-width:380px; position:relative; }
+  .search input {
+    width:100%; padding:9px 14px 9px 36px; border:1px solid var(--border); border-radius:10px;
+    font-size:14px; outline:none; background:var(--bg); transition:.15s;
+  }
+  .search input:focus { border-color:var(--accent); background:#fff; box-shadow:0 0 0 3px rgba(37,99,235,.1); }
+  .search svg { position:absolute; left:11px; top:9px; width:17px; height:17px; stroke:var(--text2); fill:none; stroke-width:2; }
+  .cats { display:flex; gap:8px; flex-wrap:wrap; }
+  .cat {
+    padding:7px 14px; border-radius:999px; border:1px solid var(--border); background:#fff; font-size:13px;
+    cursor:pointer; transition:.15s; color:var(--text2); user-select:none;
+  }
+  .cat:hover { border-color:var(--accent); color:var(--accent); }
+  .cat.active { background:var(--accent); color:#fff; border-color:var(--accent); }
+  .boards { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  .board {
+    padding:6px 13px; border-radius:999px; border:1px solid var(--border); background:#fff; font-size:12.5px;
+    cursor:pointer; transition:.15s; color:var(--text2); user-select:none;
+  }
+  .board:hover { border-color:var(--accent); color:var(--accent); }
+  .board.active { background:#1e3a8a; color:#fff; border-color:#1e3a8a; }
+  .sttoggle { display:flex; align-items:center; gap:6px; font-size:13px; color:var(--text2); cursor:pointer; user-select:none; margin-left:6px; }
+  .sttoggle input { width:15px; height:15px; cursor:pointer; accent-color:var(--accent); }
+  .datefilter { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  .dflabel { font-size:13px; font-weight:600; color:var(--text); }
+  .dranges { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  .dbtn {
+    padding:6px 13px; border-radius:999px; border:1px solid var(--border); background:#fff; font-size:12.5px;
+    cursor:pointer; transition:.15s; color:var(--text2); user-select:none;
+  }
+  .dbtn:hover { border-color:var(--accent); color:var(--accent); }
+  .dbtn.active { background:#1e3a8a; color:#fff; border-color:#1e3a8a; }
+  .filters { margin-left:auto; display:flex; gap:10px; align-items:stretch; flex-wrap:wrap; }
+  .board-select, .range-select { padding:6px 10px; border-radius:8px; border:1px solid var(--border); background:#fff; font-size:13px; color:var(--text); outline:none; cursor:pointer; }
+  .fblock { display:flex; align-items:center; gap:8px; padding:7px 12px; border-radius:10px; border:1px solid var(--border); }
+  .fblock-cat { background:#eef2ff; }
+  .fblock-cat { min-width:0; max-width:100%; flex-wrap:wrap; }
+  .filters { max-width:100%; min-width:0; }
+  .cat { white-space:nowrap; }
+  .fblock-board { background:#f0fdf4; }
+  .fblock-date { background:#fff7ed; }
+  .flabel { font-size:12px; font-weight:700; color:var(--text2); white-space:nowrap; }
+  .main { display:flex; gap:16px; padding:16px 24px; height:calc(100vh - 210px); min-height:480px; }
+  .list { width:400px; min-width:0; overflow-y:auto; background:var(--card); border:1px solid var(--border); border-radius:14px; padding:10px; }
+  .list::-webkit-scrollbar { width:8px; }
+  .list::-webkit-scrollbar-thumb { background:#d1d5db; border-radius:4px; }
+  .group-title { font-size:12px; color:var(--text2); font-weight:600; padding:10px 8px 6px; position:sticky; top:0; background:var(--card); z-index:2; }
+  .stock {
+    padding:10px 12px; border-radius:10px; cursor:pointer; transition:.12s; border:1px solid transparent; margin-bottom:2px;
+  }
+  .stock:hover { background:#f0f4ff; }
+  .stock.active { background:#e8efff; border-color:#bfd4fe; }
+  .stock .row1 { display:flex; align-items:center; gap:8px; }
+  .stock .nm { font-size:14px; font-weight:600; }
+  .stock .cd { font-size:12px; color:var(--text2); }
+  .stock .mv { font-size:12px; color:#8b93a7; font-weight:500; }
+  .stock .chg { margin-left:auto; font-size:13px; font-weight:700; font-variant-numeric:tabular-nums; }
+  .chgs { display:flex; gap:6px; margin-top:5px; flex-wrap:wrap; }
+  .chip {
+    font-size:11px; padding:2px 7px; border-radius:5px; font-weight:600; font-variant-numeric:tabular-nums;
+    background:#f3f4f6; color:var(--text2); white-space:nowrap;
+  }
+  .chip.up { background:#fdecec; color:var(--red); }
+  .chip.down { background:#e6f6ee; color:var(--green); }
+  .stock .badge {
+    font-size:10px; padding:2px 8px; border-radius:999px; background:#eef2ff; color:#4f46e5; font-weight:500; white-space:nowrap;
+  }
+  .stock .rsn { font-size:12px; color:var(--text2); margin-top:4px; line-height:1.5; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+  .up { color:var(--red); } .down { color:var(--green); }
+  .panel { flex:1; background:var(--card); border:1px solid var(--border); border-radius:14px; display:flex; flex-direction:column; min-width:0; }
+  .panel-head { padding:10px 20px 4px; border-bottom:1px solid var(--border); }
+  .panel-head .t1 { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; }
+  .panel-head .t1 .nm { font-size:20px; font-weight:700; }
+  .panel-head .t1 .cd { font-size:13px; color:var(--text2); }
+  .panel-head .t1 .px { font-size:24px; font-weight:700; font-variant-numeric:tabular-nums; }
+  .panel-head .t1 .mv { font-size:13px; color:#6b7280; font-weight:600; background:#f3f4f6; padding:2px 8px; border-radius:6px; }
+  .panel-head .rsn { font-size:13px; color:var(--text2); margin-top:6px; line-height:1.6; }
+  #p_anns { margin-top:6px; display:block; max-height:110px; overflow-y:auto; padding:6px 10px; background:#fffaf0; border:1px solid #fde8c8; border-radius:8px; }
+  #p_anns .ann-item { display:flex; gap:10px; align-items:baseline; padding:2px 0; }
+  #p_anns .ann-date { font-size:11px; color:#b45309; font-weight:600; white-space:nowrap; background:#fef3c7; padding:1px 7px; border-radius:4px; }
+  #p_anns .ann-title { font-size:12px; color:#78350f; line-height:1.5; }
+  #chart { flex:1; min-height:380px; padding:6px; }
+  .empty { display:flex; align-items:center; justify-content:center; height:100%; color:var(--text2); font-size:15px; }
+  .hint { font-size:12px; color:var(--text2); padding:2px 20px 10px; }
+  @media (max-width: 900px) {
+    .main { flex-direction:column; height:auto; }
+    .list { width:100%; max-height:340px; }
+    .toolbar, .main { padding:12px; }
+    .filters { margin-left:0; width:100%; }
+    .panel { min-height:620px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="header"><div><h1>A股公告看板</h1><div class="sub" id="header_sub">读取数据中…</div></div></div>
+<div id="quality" role="status" style="padding:8px 24px;background:#fffbeb;font-size:12px;line-height:1.7"></div>
+<div class="toolbar" style="flex-wrap:wrap;">
+  <div class="search">
+    <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+    <input id="search" type="text" placeholder="搜索代码 / 名称 / 事件关键词...">
+  </div>
+  <div class="filters">
+    <div class="fblock fblock-cat"><span class="flabel">类别</span><div class="cats" id="cats"></div></div>
+    <div class="fblock fblock-board"><span class="flabel">板块</span><select id="boards" class="board-select"></select><label class="sttoggle"><input type="checkbox" id="stswitch"> 含ST</label></div>
+    <div class="fblock fblock-date"><span class="flabel">时间</span><select id="dranges" class="range-select"></select></div>
+  </div>
+</div>
+
+<div class="main">
+  <div class="list" id="list"></div>
+  <div class="panel">
+    <div class="panel-head" id="phead">
+      <div class="t1"><span class="nm" id="p_nm">-</span><span class="cd" id="p_cd">-</span><span class="mv" id="p_mv"></span><span class="px" id="p_px">-</span><span class="px" id="p_chg"></span></div>
+      <div class="rsn" id="p_rsn">点击左侧股票查看详情与K线</div>
+      <div id="p_anns" style="display:none;"></div>
+    </div>
+    <div id="chart"><div class="empty">👈 从左侧选择一只股票</div></div>
+    <div class="hint" id="chart_hint">行情按日收盘更新；缺失值显示 —。事件分类由标题关键词规则产生，可点击公告原文核实。</div>
+  </div>
+</div>
+
+<script src="data_list.js"></script>
+<script src="data_kline_manifest.js"></script>
+<script src="dashboard.js"></script>
+</body>
+</html>
