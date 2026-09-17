@@ -12,7 +12,7 @@ from . import board,db
 from .config import get_build_config,site_title
 from .locking import writer_lock
 from .paths import site_dir,web_dir,data_dir,BASE_DIR
-from .validator import verify_artifact
+from .validator import verify_artifact,verify_data_dir
 
 KLINE_SHARDS=16
 KLINE_BARS=120
@@ -223,6 +223,13 @@ def build_data(site=None,days=90):
             _write_json(stage/'artifact.json',{'format':2,'kind':'data',
                 'generated_at':payload['meta']['generated_at'],'files':files,
                 'stocks':len(payload['items']),'source':payload['meta']['source'],'range':payload['range']})
+            # ★ 安装前自检（2026-09-17 补）：stage 校验不过就绝不安装，旧数据层原样保留。
+            #   旧 build() 有 verify_artifact(stage) 这道门，站点固定化改造时漏在了 build_data 里。
+            #   少了它，DB 空 / 分片缺 / 清单对不上时会把半成品数据层直接顶上线。
+            checked=verify_data_dir(stage)
+            if not checked.get('ok'):
+                return {'ok':False,'kind':'data','site':str(target),
+                    'error':'数据层自检失败: '+str(checked.get('error'))}
             backup=None
             if target.exists():
                 backup=Path(tempfile.mkdtemp(prefix='.board-data-prev-',dir=shell))

@@ -200,9 +200,14 @@ def verify_shell(site):
         return {'ok': False, 'kind': 'shell', 'error': str(exc)}
 
 
-def verify_data(site):
-    """校验数据层 docs/data/。这是每轮 push 之前的最后一道门。"""
-    root = Path(site) / DATA_SUBDIR
+def verify_data_dir(root):
+    """校验一个「数据层目录」本身。
+
+    build_data() 的 stage 目录与 docs/data/ 布局完全一致，所以它可以在
+    os.replace 安装之前拿 stage 跑这一套自检 —— 校验不过就绝不安装，
+    旧数据层原样保留（对齐旧 build() 里 verify_artifact(stage) 的做法）。
+    """
+    root = Path(root)
     try:
         manifest, files, actual = _verify_manifest(root, 'data', DATA_REQUIRED)
 
@@ -242,3 +247,8 @@ def verify_data(site):
                 'stocks': len(stocks), 'codes': codes}
     except (OSError, ValueError, KeyError, TypeError) as exc:
         return {'ok': False, 'kind': 'data', 'error': str(exc)}
+
+
+def verify_data(site):
+    """校验数据层 docs/data/。这是每轮 push 之前的最后一道门。"""
+    return verify_data_dir(Path(site) / DATA_SUBDIR)

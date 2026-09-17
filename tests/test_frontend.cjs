@@ -12,8 +12,18 @@ const element=id=>{
 };
 const document={getElementById:element,querySelectorAll:()=>[],head:{appendChild(){}},createElement:()=>element('script')};
 class TestDate extends Date { static now(){return Date.parse('2026-09-15T00:00:00Z');} }
-const context=vm.createContext({window:{ANNO_LIST:[],ANNO_META:{},ANNO_KLINE_SHARDS:{shards:16,files:{}},ANNO_TAXONOMY:[],addEventListener(){}},
-  document,location:{search:''},URL,URLSearchParams,Date:TestDate,Map,Set,Promise,console,setTimeout:()=>0,clearTimeout(){}});
+// 站点固定化（2026-09-16）后 dashboard.js 改为运行时 fetch data/*.json，
+// 不再依赖 window.ANNO_* 内嵌全局变量。这里给一个最小 fetch 替身：
+// 只要返回 {ok,status,json()} 形状，让 boot() 能跑完不抛即可。
+// 同时把请求过的 URL 记下来，供「K线分片走清单文件名」那条用例断言。
+const fetchCalls=[];
+const fetchStub=url=>{
+  fetchCalls.push(url);
+  const body=url.includes('stocks')?[]:url.includes('manifest')?{shards:16,files:{}}:url.includes('taxonomy')?[]:{};
+  return Promise.resolve({ok:true,status:200,json:()=>Promise.resolve(body)});
+};
+const context=vm.createContext({window:{addEventListener(){}},
+  document,fetch:fetchStub,location:{search:''},URL,URLSearchParams,Date:TestDate,Map,Set,Promise,console,setTimeout:()=>0,clearTimeout(){}});
 vm.runInContext(source,context);
 let passed=0;
 function test(name,fn){fn();passed++;console.log('PASS '+name);}
@@ -49,9 +59,25 @@ test('无匹配股票清空选中状态和旧图表',()=>{
   run("activeCode='300001';activeCat='不存在';renderList()");
   assert.equal(run('activeCode'),null);assert.match(element('chart').innerHTML,/无匹配股票/);
 });
-test('UI采用构建清单中的哈希资源',()=>{
-  assert.match(source,/manifest\.files/);assert.match(source,/meta\.echarts_url/);
+test('UI走数据层协议：fetch + 常量资源路径',()=>{
+  assert.equal(run('DATA_DIR'),'data/');
+  assert.equal(run('ECHARTS_URL'),'lib/echarts.min.js');
+  assert.match(source,/fetch\(path/);
+  assert.match(source,/manifest\.files/);
+  // 旧协议已废弃：内嵌全局变量、清单里的 echarts_url 字段、哈希分片文件名
+  assert.doesNotMatch(source,/meta\.echarts_url/);
+  assert.doesNotMatch(source,/ANNO_KLINE_SHARDS/);
   assert.doesNotMatch(source,/el\.src\s*=\s*'data_kline_'/);
+});
+test('loadJSON 对同一路径只发一次请求',()=>{
+  const first=run("loadJSON(DATA_DIR+'kline_9.json')");
+  const second=run("loadJSON(DATA_DIR+'kline_9.json')");
+  assert.equal(first,second);
+});
+test('K线分片按清单里的文件名取数据',()=>{
+  run("manifest={shards:16,files:{'3':'kline_3.json'}}");
+  run("loadKline('3')");
+  assert.ok(fetchCalls.includes('data/kline_3.json'),'应请求 data/kline_3.json，实际：'+fetchCalls.join(','));
 });
 test('原始ECharts包可加载并提供图表API',()=>{
   const vendor={window:{},navigator:{userAgent:'Node.js'},console};vm.createContext(vendor);
