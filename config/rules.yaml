@@ -365,9 +365,16 @@ fetch:
     sleep: 0.35
     probe_workers: 4
     day_workers: 4
+  # ★ 2026-09-17 用户定：「以后增量就是最近三天就行」。
+  #   历史由专用全量仓（baibiaowang/panda-board-full）负责，现仓只做最近 N 天的增量。
+  #   机制：plan_dates() 返回 recent + todo[:budget-len(recent)]。
+  #   令 days_per_run == lookback_days → todo 切到 0 条 → 每轮只抓最近 lookback_days 天，
+  #   不再往前补历史（这正是"增量只扫最近三天"要的行为）。
+  #   ⚠️ 改这两个值要**成对改**：days_per_run < lookback_days 会直接抛
+  #      ValueError('单轮预算不能小于回看天数')（见 app/window.py:20-21）。
   scan_days: 90
-  days_per_run: 12
-  lookback_days: 2
+  days_per_run: 3
+  lookback_days: 3
 network:
   timezone: Asia/Shanghai
   connect_timeout: 10
