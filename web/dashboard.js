@@ -129,6 +129,10 @@ function select(code) {
   const found=visible.find(v=>v.stock.code===code);
   if (!found) return;
   activeCode=code;const token=++generation;const {stock:s,anns}=found;
+  // K线标注用全量公告：不受分类、搜索词、时间范围任何筛选影响。
+  // K线本身已限定可视日期（默认最近60根、可拖动缩放），announcementPoints 会自动丢掉范围外的；
+  // 外面再套一层时间筛选只会把标注清空（实测 2026-09-18：选"近3天" → 12 条公告全被滤掉 → K线零标注）。
+  const allAnns=(s.announcements||[]).filter(a=>a.date && a.date<=todayCN());
   document.querySelectorAll('.stock').forEach(el=>el.classList.toggle('active',el.dataset.code===code));
   $('p_nm').textContent=s.name;$('p_cd').textContent=s.code;
   $('p_mv').textContent=fmtMv(s.market_cap) ? '参考市值 '+fmtMv(s.market_cap) : '';
@@ -136,8 +140,10 @@ function select(code) {
   $('p_px').style.color=known(s.chg) ? (s.chg>=0?RED:GREEN) : '';
   $('p_chg').textContent=fmt(s.chg);$('p_chg').style.color=$('p_px').style.color;
   const adjustment={qfq:'前复权',none:'不复权',unknown:'旧数据口径未核实'}[s.adjustment] || '口径未知';
-  $('p_rsn').textContent=`匹配 ${anns.length} 条公告 · 日线 ${s.price_date || '暂无'} · ${s.price_source || '行情源未知'} / ${adjustment}`;
-  $('p_anns').innerHTML=[...anns].reverse().map(a=>{const url=safeLink(a.url);return `<div class="ann-item"><span class="ann-date">${esc(a.date)}</span><span class="ann-title">[${esc(a.category)}] ${url ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(a.title)}</a>` : esc(a.title)}</span></div>`;}).join('');
+  $('p_rsn').textContent=`匹配 ${anns.length} 条 / 窗口内共 ${allAnns.length} 条公告 · 日线 ${s.price_date || '暂无'} · ${s.price_source || '行情源未知'} / ${adjustment}`;
+  // 公告区展示该股窗口内【全部】公告：命中当前分类的加红突出，其余黑色照常展示。
+  // 数据源用 allAnns（与 K 线标注同一份，不受分类/搜索词影响）；选"全部"时不加红（没有"被筛中的分类"）。
+  $('p_anns').innerHTML=[...allAnns].reverse().map(a=>{const url=safeLink(a.url);const hit=activeCat!=='全部'&&a.category===activeCat;return `<div class="ann-item${hit?' ann-hit':''}"><span class="ann-date">${esc(a.date)}</span><span class="ann-title">[${esc(a.category)}] ${url ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(a.title)}</a>` : esc(a.title)}</span></div>`;}).join('');
   $('p_anns').style.display='block';
   clearChart('K线加载中…');
   const sh=String(Number(code)%(manifest.shards || 16));
@@ -147,14 +153,16 @@ function select(code) {
       const k=(kline || {})[code] || [];
       if(!k.length){clearChart('该股票暂无可用K线；请检查行情日期与采集记录');return;}
       $('p_px').textContent=k.at(-1)[2].toFixed(2);
-      return loadScript(ECHARTS_URL,()=>!!window.echarts).then(()=>{if(token===generation)drawChart(s,k,anns);});
+      return loadScript(ECHARTS_URL,()=>!!window.echarts).then(()=>{if(token===generation)drawChart(s,k,allAnns);});
     }).catch(error=>{if(token===generation)clearChart(error.message+'，请刷新页面或重试',()=>select(code));});
 }
 function announcementPoints(anns,dates) {
   return anns.flatMap(a=>{
-    // Older announcements must never be mislabelled as the first bar.
-    if(a.date<dates[0] || a.date>dates.at(-1))return [];
-    const i=dates.findIndex(d=>d>=a.date);
+    // 公告日无对应K线（周末/停牌/超出右端）时，标在它【之前】的最后一根上。
+    // 口径与项目其他部分一致：基准是"公告前一根收盘价"（见 app/board.py _chg_stats 的 base 子查询）。
+    // 公告早于第一根K线（i<0）→ 丢弃，绝不把它错标成第一根。
+    let i=-1;
+    for(let j=dates.length-1;j>=0;j--){if(dates[j]<=a.date){i=j;break;}}
     return i<0 ? [] : [{...a,i,anchorDate:dates[i],shifted:dates[i]!==a.date}];
   });
 }
@@ -169,7 +177,7 @@ function drawChart(s,k,anns) {
       if(!first || !k[first.dataIndex])return '';
       const i=first.dataIndex,r=k[i],chg=i>0?(r[2]/closes[i-1]-1)*100:null;
       let text=`<b>${esc(dates[i])}</b><br>开 ${r[1].toFixed(2)} 收 ${r[2].toFixed(2)} (${fmt(chg)})<br>高 ${r[3].toFixed(2)} 低 ${r[4].toFixed(2)}<br>成交量（源值）${vols[i].toLocaleString()}`;
-      for(const p of points.filter(p=>p.i===i))text+=`<div style="max-width:360px;white-space:normal;margin-top:6px;color:#b45309">${esc(p.date)} · ${esc(p.title)}${p.shifted?'（无对应日线，标在后一根K线）':''}</div>`;
+      for(const p of points.filter(p=>p.i===i))text+=`<div style="max-width:360px;white-space:normal;margin-top:6px;color:#b45309">${esc(p.date)} · [${esc(p.category||"")}] ${esc(p.title)}${p.shifted?'（无对应日线，标在前一根K线）':''}</div>`;
       return text;
     }},
     grid:[{left:65,right:20,top:22,height:'60%'},{left:65,right:20,top:'77%',height:'14%'}],
@@ -177,11 +185,11 @@ function drawChart(s,k,anns) {
     yAxis:[{scale:true,splitLine:{lineStyle:{color:'#eef0f5'}}},{gridIndex:1,splitNumber:2,axisLabel:{formatter:v=>v>=10000?(v/10000).toFixed(0)+'万':v},splitLine:{show:false}}],
     dataZoom:[{type:'inside',xAxisIndex:[0,1],startValue:Math.max(0,k.length-60),endValue:k.length-1},{type:'slider',xAxisIndex:[0,1],bottom:3,height:18}],
     series:[{name:'K线',type:'candlestick',data:ohlc,itemStyle:{color:RED,color0:GREEN,borderColor:RED,borderColor0:GREEN},
-      markPoint:{symbol:'pin',symbolSize:30,label:{fontSize:10,formatter:p=>p.data.shifted?'顺延':'公告'},itemStyle:{color:'#f59e0b'},data:points.map(p=>({coord:[p.anchorDate,k[p.i][3]],name:p.title,shifted:p.shifted}))},
+      markPoint:{symbol:'pin',symbolSize:30,label:{fontSize:10,formatter:p=>p.data.shifted?'前一根':'公告'},itemStyle:{color:'#f59e0b'},data:points.map(p=>({coord:[p.anchorDate,k[p.i][3]],name:p.title,shifted:p.shifted}))},
       markLine:{symbol:'none',silent:true,label:{show:false},lineStyle:{color:'#f59e0b',type:'dashed',width:1},data:[...new Set(points.map(p=>p.anchorDate))].map(d=>({xAxis:d}))}},
       ...[5,10,20].map((n,i)=>({name:'MA'+n,type:'line',data:ma(n),showSymbol:false,lineStyle:{width:1,color:['#f59e0b','#3b82f6','#a855f7'][i]}})),
       {name:'成交量',type:'bar',xAxisIndex:1,yAxisIndex:1,data:vols,itemStyle:{color:p=>k[p.dataIndex][2]>=k[p.dataIndex][1]?'rgba(230,52,58,.55)':'rgba(10,168,88,.55)'}}]});
-  $('chart_hint').textContent=`K线共 ${k.length} 根，默认显示最近60根，可拖动缩放。橙色标记为匹配公告日期；“顺延”只表示该日无对应K线。日/5日为最近1/5个价格间隔涨跌；窗口首公告以前一根收盘价为基准，并非公告后可交易收益。缺失值为 —。`;
+  $('chart_hint').textContent=`K线共 ${k.length} 根，默认显示最近60根，可拖动缩放。橙色标记为该股窗口内全部公告（不受分类筛选影响）；“前一根”只表示该日无对应K线，标记落在它之前最近的一根上。日/5日为最近1/5个价格间隔涨跌；窗口首公告以前一根收盘价为基准，并非公告后可交易收益。缺失值为 —。`;
 }
 function renderQuality() {
   const cov=meta.coverage || {},run=meta.run || {};
