@@ -69,6 +69,12 @@ def detect_gaps(days=90,thin_below=5):
 def build_payload(days=90):
     db.init_db()
     engine=get_engine()
+    # 展示窗口必须与判定层同一口径：取 min(配置窗口, 已采集跨度)。
+    # 否则判定层放行、展示层却报"缺 N 天"，自己打自己脸（跨度不足 90 天时必现）。
+    src=source_name()
+    earliest=db.scalar('SELECT MIN(date) FROM fetch_days_v2 WHERE source=?',(src,))
+    if earliest:
+        days=max(1,min(days,(today_cn()-date.fromisoformat(earliest)).days+1))
     start,end=window_dates(days)
     rows=db.query("SELECT * FROM announcements WHERE category<>'other' AND is_noise=0 AND date BETWEEN ? AND ? ORDER BY code,date,ann_id",(start,end))
     agg={}
