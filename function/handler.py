@@ -27,7 +27,11 @@ except ModuleNotFoundError:  # 从仓库根目录本地跑时的回退
 
 SECRETS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'secrets.json')
 POLL_INTERVAL = 30
-DEFAULT_TTL = 3600
+# ★ 实测整轮 ~4.4 分钟（clone + pip + cycle），3600s 意味着每轮空转约 55 分钟。
+#   注意 PANDASTACK_SANDBOX_TTL 是个死参数：平台不往 handler 注入 env（见本文件顶部契约），
+#   所以配 env 无效，改 TTL 只能改代码。
+#   1800s 留约 6.8 倍余量；真被掐也不推坏数据（不变量：任何一步不通过都不提交）。
+DEFAULT_TTL = 1800
 DEFAULT_POLL_SECONDS = 1500
 
 
@@ -60,7 +64,7 @@ def _q(value):
     return shlex.quote(str(value))
 
 
-def run_script(cfg):
+def run_script(cfg, sid):
     """沙箱内执行的脚本。
 
     ★ 开头必须 cd /：点火命令如果先 cd 进某个目录、而脚本又删掉那个目录，
@@ -80,13 +84,22 @@ def run_script(cfg):
         f'https://github.com/{_q(cfg["code_repo"])}.git /workspace/panda-board',
         'cd /workspace/panda-board',
         'python3 -m pip install --no-input -q -r requirements.txt',
+        'rc=0',
         'BOARD_DATA_DIR=/workspace/work python3 -m app.cli cycle '
         f'--data-repo /workspace/panda-board-data --repo {_q(cfg["data_repo"])} '
-        f'--branch {_q(cfg["data_branch"])} > /workspace/update.log 2>&1',
-        'echo "$?" > /workspace/update-exit',
+        f'--branch {_q(cfg["data_branch"])} > /workspace/update.log 2>&1 || rc=$?',
+        'echo "$rc" > /workspace/update-exit',
         # 自删前 sync：否则 ext4 延迟分配来不及回写，日志尾部留 NUL 空洞，
         # 看起来像被强杀，实际是正常跑完。
         'sync',
+        # ★ 跑完立刻自删，别空转到 TTL：cycle 实测 4.4 分钟，白烧的时间全在这之后。
+        #   只在成功时删 —— 失败要留着沙箱给 TTL 兜底，好让人进去看 update.log。
+        #   自删依赖沙箱能出网调 api.pandastack.ai（本机直连可用，沙箱内未经证实），
+        #   所以失败一律 || true 吞掉，兜底交给 TTL。
+        'if [ "$rc" = "0" ]; then',
+        f'  curl -s -X DELETE -H {_q("Authorization: Bearer " + cfg["api_key"])} '
+        f'https://api.pandastack.ai/v1/sandboxes/{_q(sid)} >/dev/null 2>&1 || true',
+        'fi',
     ])
 
 
@@ -144,8 +157,32 @@ def handler(event=None):
             return {'ok': False, 'completed': False,
                     'error': '平台未返回可解析的沙箱 ID，任务未开始',
                     'response_keys': sorted(created.keys())}
+        # ★ 等沙箱就绪再点火：建完立刻 exec 会吃 404（冷启动实测 15~20 秒），
+        #   平台侧重试 3 次若全落在冷启动窗口内 → 整轮 exec attempt 3: 404 失败
+        #   （2026-09-17 连挂三轮，同一错、同一 137 秒超时）。
+        #   这里自己轮询探活，探活通过才写文件/点火；探不活就放弃，由 finally 删沙箱。
+        # ★ 强制「点火即返回」：handler 原地轮询会被平台 Function 时限掐掉。
+        #   实测四轮 duration_ms 恒为 136655/136743/136866/136922（±270ms）——
+        #   这是平台硬超时，不是业务耗时；而原设计 poll 默认 1500s，必然被掐。
+        #   （C-66：exec 长任务要点火即返回，否则超时）
+        poll_seconds = 0
+        ready_interval = 10
+        ready_retries = 3
+        ready = False
+        for _ in range(ready_retries):
+            try:
+                api.call('POST', f'/v1/sandboxes/{sid}/exec', {
+                    'cmd': 'echo ready', 'timeout_seconds': 30,
+                }, timeout=60)
+                ready = True
+                break
+            except Exception:
+                time.sleep(ready_interval)
+        if not ready:
+            return {'ok': False, 'sandbox_id': sid, 'completed': False,
+                    'error': '沙箱 %d 秒内未就绪，未点火' % (ready_interval * ready_retries)}
         api.write_file(sid, '/workspace/github-token', cfg['token'].encode())
-        api.write_file(sid, '/workspace/run-update.sh', run_script(cfg).encode())
+        api.write_file(sid, '/workspace/run-update.sh', run_script(cfg, sid).encode())
         # 点火即返回。发完用 pgrep 复核，"发出命令"不等于"跑起来了"。
         api.call('POST', f'/v1/sandboxes/{sid}/exec', {
             'cmd': 'chmod +x /workspace/run-update.sh; cd /; '
@@ -153,6 +190,15 @@ def handler(event=None):
                    'sleep 2; pgrep -f run-update.sh >/dev/null && echo launched || echo launch-failed',
             'timeout_seconds': 60,
         }, timeout=90)
+
+        # 点火成功 → 本轮绝不能删沙箱（删了就杀了正在跑的任务）。
+        # 清空 sid / raw_id 让 finally 跳过 DELETE，沙箱靠 TTL(3600s) 与下一轮
+        # role=panda-board-update 孤儿清理回收；成败看数据仓提交，不看本轮 run 状态。
+        box = sid
+        sid = ''
+        raw_id = ''
+        return {'ok': True, 'sandbox_id': box, 'completed': False, 'exit_code': None,
+                'note': '点火即返回未等待；成败以数据仓提交为准'}
 
         deadline = time.monotonic() + poll_seconds
         while poll_seconds and time.monotonic() < deadline:
