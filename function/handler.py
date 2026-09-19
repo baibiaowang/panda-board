@@ -26,13 +26,11 @@ except ModuleNotFoundError:  # 从仓库根目录本地跑时的回退
     from app.panda_api import PandaAPI, resource_id
 
 SECRETS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'secrets.json')
-POLL_INTERVAL = 30
 # ★ 实测整轮 ~4.4 分钟（clone + pip + cycle），3600s 意味着每轮空转约 55 分钟。
 #   注意 PANDASTACK_SANDBOX_TTL 是个死参数：平台不往 handler 注入 env（见本文件顶部契约），
 #   所以配 env 无效，改 TTL 只能改代码。
 #   1800s 留约 6.8 倍余量；真被掐也不推坏数据（不变量：任何一步不通过都不提交）。
 DEFAULT_TTL = 1800
-DEFAULT_POLL_SECONDS = 1500
 
 
 def load_config():
@@ -70,6 +68,11 @@ def run_script(cfg, sid):
     ★ 开头必须 cd /：点火命令如果先 cd 进某个目录、而脚本又删掉那个目录，
       cwd 会变成不存在的路径，随后任何命令都报 getcwd() failed，
       错误信息完全指不到真正的原因。
+
+    ★ 失败必须留痕：set -eu 下任何一步失败都会直接终止脚本，所以
+      ① 开头挂 EXIT trap 兜底写退出码；② 每个阶段各自落一份日志。
+      旧版把整条脚本的 stdout/stderr 丢进 /dev/null、又不写 update-exit，
+      结果是"跑挂了但一片空白"，只能进沙箱手工复现（2026-09-19 实测）。
     """
     return '\n'.join([
         'set -eu',
@@ -78,12 +81,25 @@ def run_script(cfg, sid):
         'rm -f /workspace/github-token',
         'export PYTHONUNBUFFERED=1',
         'rm -rf /workspace/panda-board /workspace/panda-board-data /workspace/work',
-        'rm -f /workspace/update-exit',
+        'rm -f /workspace/update-exit /workspace/clone.log /workspace/pip.log',
+        # ★ 早退兜底：-s 保护让成功路径写下的退出码不被覆盖。
+        'trap \'rc=$?; [ -s /workspace/update-exit ] || printf %s "$rc" > /workspace/update-exit || true; sync 2>/dev/null || true\' EXIT',
         'mkdir -p /workspace/panda-board-data /workspace/work',
+        # ★ clone 输出必须落盘：点火行是 `>/dev/null 2>&1`，不重定向就一行都看不到。
+        # ★ 凭据走 GIT_ASKPASS，不进 URL —— 既不落沙箱内 .git/config 的 origin，
+        #   也不会被 git 的报错带回日志（与 app/github_store.py::_git_env 同一约定）。
+        #   private 仓裸 clone 会报 could not read Username（2026-09-19 实测）。
+        'cat > /workspace/askpass.sh <<\'ASKPASS\'',
+        '#!/bin/sh',
+        'printf %s "$GITHUB_TOKEN"',
+        'ASKPASS',
+        'chmod +x /workspace/askpass.sh',
+        'export GIT_ASKPASS=/workspace/askpass.sh GIT_TERMINAL_PROMPT=0',
         f'git clone --depth 1 --branch {_q(cfg["code_branch"])} '
-        f'https://github.com/{_q(cfg["code_repo"])}.git /workspace/panda-board',
+        f'https://x-access-token@github.com/{_q(cfg["code_repo"])}.git /workspace/panda-board '
+        f'> /workspace/clone.log 2>&1',
         'cd /workspace/panda-board',
-        'python3 -m pip install --no-input -q -r requirements.txt',
+        'python3 -m pip install --no-input -q -r requirements.txt > /workspace/pip.log 2>&1',
         'rc=0',
         'BOARD_DATA_DIR=/workspace/work python3 -m app.cli cycle '
         f'--data-repo /workspace/panda-board-data --repo {_q(cfg["data_repo"])} '
@@ -93,7 +109,8 @@ def run_script(cfg, sid):
         # 看起来像被强杀，实际是正常跑完。
         'sync',
         # ★ 跑完立刻自删，别空转到 TTL：cycle 实测 4.4 分钟，白烧的时间全在这之后。
-        #   只在成功时删 —— 失败要留着沙箱给 TTL 兜底，好让人进去看 update.log。
+        #   只在成功时删 —— 失败要留着沙箱给 TTL 兜底，好让人进去看
+        #   clone.log / pip.log / update.log 三份日志。
         #   自删依赖沙箱能出网调 api.pandastack.ai（本机直连可用，沙箱内未经证实），
         #   所以失败一律 || true 吞掉，兜底交给 TTL。
         'if [ "$rc" = "0" ]; then',
@@ -103,17 +120,6 @@ def run_script(cfg, sid):
     ])
 
 
-def _tail(api, sid, limit=2000):
-    try:
-        reply = api.call('POST', f'/v1/sandboxes/{sid}/exec', {
-            'cmd': f'tail -c {limit} /workspace/update.log 2>/dev/null || true',
-            'timeout_seconds': 30,
-        }, timeout=60)
-        return (reply.get('stdout') or '')[-limit:]
-    except Exception as exc:
-        return f'<log unavailable: {type(exc).__name__}>'
-
-
 def handler(event=None):
     cfg = load_config()
     missing = [k for k in ('api_key', 'code_repo', 'data_repo', 'token') if not cfg[k]]
@@ -121,7 +127,6 @@ def handler(event=None):
         return {'ok': False, 'error': 'bundle 缺少配置: ' + ', '.join(missing)}
 
     ttl = max(600, min(int(os.environ.get('PANDASTACK_SANDBOX_TTL', DEFAULT_TTL)), DEFAULT_TTL))
-    poll_seconds = max(0, int(os.environ.get('PANDASTACK_POLL_SECONDS', DEFAULT_POLL_SECONDS)))
 
     api = PandaAPI(cfg['api_key'])
     created = api.call('POST', '/v1/sandboxes', {
@@ -165,7 +170,6 @@ def handler(event=None):
         #   实测四轮 duration_ms 恒为 136655/136743/136866/136922（±270ms）——
         #   这是平台硬超时，不是业务耗时；而原设计 poll 默认 1500s，必然被掐。
         #   （C-66：exec 长任务要点火即返回，否则超时）
-        poll_seconds = 0
         ready_interval = 10
         ready_retries = 3
         ready = False
@@ -200,27 +204,6 @@ def handler(event=None):
         return {'ok': True, 'sandbox_id': box, 'completed': False, 'exit_code': None,
                 'note': '点火即返回未等待；成败以数据仓提交为准'}
 
-        deadline = time.monotonic() + poll_seconds
-        while poll_seconds and time.monotonic() < deadline:
-            time.sleep(POLL_INTERVAL)
-            reply = api.call('POST', f'/v1/sandboxes/{sid}/exec', {
-                'cmd': 'cat /workspace/update-exit 2>/dev/null || echo running',
-                'timeout_seconds': 30,
-            }, timeout=60)
-            lines = (reply.get('stdout') or '').strip().splitlines()
-            state = lines[-1] if lines else 'running'
-            if state == 'running':
-                continue
-            try:
-                code = int(state)
-            except ValueError:
-                continue
-            return {'ok': code == 0, 'sandbox_id': sid, 'exit_code': code,
-                    'completed': True, 'log_tail': _tail(api, sid)}
-
-        return {'ok': False, 'sandbox_id': sid, 'completed': False,
-                'error': '轮询超时，任务可能仍在沙箱内运行；成败以 GitHub 提交为准',
-                'log_tail': _tail(api, sid)}
     finally:
         # 沙箱用完必须显式删 —— TTL 只是第二道防线。
         # sid 解析失败时退回平台返回的原始 id（仅接受纯 [A-Za-z0-9_-]，避免拼出畸形 URL）。
