@@ -200,51 +200,81 @@ def verify_shell(site):
         return {'ok': False, 'kind': 'shell', 'error': str(exc)}
 
 
+# 数据层 v2（2026-09-19）：不再有 stocks.json / kline_manifest.json / kline_0..15.json。
+# 改成 meta + home + list-<key> 索引，加 stock/ 单股详情（K 线并入单股文件）。
+DATA_V2_KEYS = ('main', 'gem', 'star', 'bse', 'st', 'all')
+DATA_V2_REQUIRED = ('meta.json', 'home.json') + tuple(f'list-{k}.json' for k in DATA_V2_KEYS)
+ITEM_FIELDS = 13
+SAMPLE_STOCKS = 10
+
+
 def verify_data_dir(root):
-    """校验一个「数据层目录」本身。
+    """校验一个「数据层目录」本身（v2 契约）。
 
     build_data() 的 stage 目录与 docs/data/ 布局完全一致，所以它可以在
     os.replace 安装之前拿 stage 跑这一套自检 —— 校验不过就绝不安装，
     旧数据层原样保留（对齐旧 build() 里 verify_artifact(stage) 的做法）。
+
+    单股文件有约 5000 个，逐个解析太慢；完整性由 artifact.json 的 sha256 全量保证
+    （_verify_manifest 已逐文件核对 hash 与大小），这里只对首尾抽样验证格式。
     """
     root = Path(root)
     try:
-        manifest, files, actual = _verify_manifest(root, 'data', DATA_REQUIRED)
-
-        stocks = _read_json(root / 'stocks.json')
-        if not isinstance(stocks, list) or not stocks:
-            raise ValueError('公告数据为空或格式无效')
-        if len(stocks) != manifest['stocks']:
-            raise ValueError('公告股票数量不匹配')
+        manifest, files, actual = _verify_manifest(root, 'data', DATA_V2_REQUIRED)
+        if manifest.get('schema') != 2:
+            raise ValueError('数据层 schema 不是 2')
 
         meta = _read_json(root / 'meta.json')
-        if not isinstance(meta, dict) or not meta.get('generated_at') or not meta.get('source'):
+        if not isinstance(meta, dict) or meta.get('v') != 2:
+            raise ValueError('meta.json 版本不是 2')
+        if not meta.get('generated_at') or not meta.get('source'):
             raise ValueError('meta.json 缺少 generated_at/source')
-        if meta.get('kline_shards') != KLINE_SHARDS:
-            raise ValueError('meta.json 的 kline_shards 与常量不一致')
+        taxonomy = meta.get('taxonomy')
+        if not isinstance(taxonomy, list) or not taxonomy:
+            raise ValueError('meta.json 缺少 taxonomy')
 
-        km = _read_json(root / 'kline_manifest.json')
-        if not isinstance(km, dict) or km.get('shards') != KLINE_SHARDS \
-                or len(km.get('files', {})) != KLINE_SHARDS:
-            raise ValueError('K线分片清单无效')
-        bars, codes = km.get('bars'), 0
-        for n in range(KLINE_SHARDS):
-            name = km['files'].get(str(n))
-            if name not in files:
-                raise ValueError('缺少K线分片')
-            bucket = _read_json(root / name)
-            if not isinstance(bucket, dict):
-                raise ValueError('K线分片格式无效')
-            for series in bucket.values():
-                if not isinstance(series, list) or (bars and len(series) > bars):
-                    raise ValueError('K线分片格式无效')
-            codes += len(bucket)
-        if codes != km.get('codes'):
-            raise ValueError('K线代码数与清单不符')
+        home = _read_json(root / 'home.json')
+        if not isinstance(home, dict) or not isinstance(home.get('items'), list):
+            raise ValueError('home.json 格式无效')
+        if home.get('count') != len(home['items']):
+            raise ValueError('home.json 的 count 与 items 数不符')
+        # ★ 不要求 home 非空。home = 主板 + 非ST + 近3天，长假期间必然为空 ——
+        #   把它当失败会让 build_data 直接拒绝安装、整站停更（fail-closed 用错了地方）。
+        #   真正的「构建有没有干活」由下面的 meta.counts 交叉核对 + stock/ 数量双重兜底。
+        counts = meta.get('counts')
+        if not isinstance(counts, dict) or counts.get('stocks') != manifest['stocks']:
+            raise ValueError('meta.counts.stocks 与 artifact.stocks 不符')
+        if counts.get('home') != len(home['items']):
+            raise ValueError('meta.counts.home 与 home.json 条数不符')
+
+        for key in DATA_V2_KEYS:
+            obj = _read_json(root / f'list-{key}.json')
+            if not isinstance(obj, dict) or not isinstance(obj.get('items'), list):
+                raise ValueError(f'list-{key}.json 格式无效')
+            if obj.get('count') != len(obj['items']):
+                raise ValueError(f'list-{key}.json 的 count 与 items 数不符')
+            for item in obj['items'][:200]:
+                if not isinstance(item, list) or len(item) != ITEM_FIELDS:
+                    raise ValueError(f'list-{key}.json 条目不是 {ITEM_FIELDS} 元数组')
+                if not isinstance(item[ITEM_FIELDS - 1], list):
+                    raise ValueError(f'list-{key}.json 末位公告字段不是数组')
+
+        stocks = sorted((root / 'stock').rglob('*.json'))
+        if not stocks:
+            raise ValueError('stock/ 下没有单股文件')
+        if len(stocks) != manifest['stocks']:
+            raise ValueError('单股文件数与 artifact 的 stocks 不符')
+        sample = stocks[:SAMPLE_STOCKS // 2] + stocks[-(SAMPLE_STOCKS // 2):]
+        for p in sample:
+            obj = _read_json(p)
+            if not isinstance(obj, dict) or obj.get('v') != 2:
+                raise ValueError(f'单股文件版本无效: {p.name}')
+            if not isinstance(obj.get('k'), list) or not isinstance(obj.get('a'), list):
+                raise ValueError(f'单股文件缺少 k/a: {p.name}')
 
         return {'ok': True, 'kind': 'data', 'files': len(actual),
                 'bytes': sum(v['size'] for v in files.values()),
-                'stocks': len(stocks), 'codes': codes}
+                'stocks': len(stocks), 'home': len(home['items'])}
     except (OSError, ValueError, KeyError, TypeError) as exc:
         return {'ok': False, 'kind': 'data', 'error': str(exc)}
 

@@ -188,18 +188,218 @@ def build_shell(site=None):
     shutil.copytree(Path(web_dir())/'lib',lib_dst)
     _write(target/'robots.txt','User-agent: *\nDisallow: /\n')
     _write(target/'.nojekyll','')
+    # ★ 清单必须排除 artifact.json 自己：rglob 扫的是**写入之前**的目录，此刻磁盘上
+    #   还躺着上一版的 artifact.json。把它算进 files，等于在清单里记下自己的**过期**
+    #   sha256，紧接着 _write_json 又把它覆盖掉 → verify_shell 逐文件核对时必然报
+    #   「产物损坏: artifact.json」，于是“改完前端跑一次标准 `cli build-shell`”
+    #   会假失败（2026-09-19 发现）。排除之后 files 只含真正的固定层文件，
+    #   与 validator._verify_manifest 的 `actual == set(files) | {'artifact.json'}` 判据正好对上。
+    manifest_path=target/'artifact.json'
     hashes={p.relative_to(target).as_posix():{'sha256':hashlib.sha256(p.read_bytes()).hexdigest(),'size':p.stat().st_size}
-        for p in sorted(target.rglob('*')) if p.is_file() and DATA_SUBDIR not in p.parts}
+        for p in sorted(target.rglob('*')) if p.is_file() and p!=manifest_path and DATA_SUBDIR not in p.parts}
     _write_json(target/'artifact.json',{'format':2,'kind':'shell',
         'generated_at':board.now_cn().isoformat(),'files':hashes})
     return {'ok':True,'kind':'shell','site':str(target),'files':len(hashes),
         'bytes':sum(v['size'] for v in hashes.values())}
 
 
-def build_data(site=None,days=90):
-    """生成数据层 docs/data/*.json。这是每轮 cycle 唯一要跑的建站步骤。"""
+# ────────────────────── 数据层 v2（2026-09-19 改造） ──────────────────────
+# 目标：首屏极快 + 切板块/时间按需加载 + 单股详情按需加载。
+#
+# 产物：
+#   meta.json                 元信息 + taxonomy 内联（首屏第 1 个请求）
+#   home.json                 首屏档：主板 + 非ST + 近3天（第 2 个请求）
+#   list-<key>.json           分板块档：实体 + 窗口内全部公告
+#   stock/<前2位>/<code>.json 单股详情：K线 + 全部公告（含 URL）
+#
+# 条目 = 13 元数组，省掉全部 key 名（全市场约省 750KB）：
+#   [c, n, b, st, cat, cap, p, ch, ch5, cha, d, lu, a]
+#   a = [[date,title,category_id], ...] —— **不带 URL**（URL 占约 2.4MB，只放单股详情）
+#
+# ★ K 线不再走 16 分片：点一只股票从 1.5~1.8MB 降到 ~7KB（-99.6%）。
+# ★ 未变化的文件用硬链接复用（inode/mtime 不变）→ git 直接跳过，解决"每轮全量重建"的开销。
+
+BOARD_KEYS=(('main','主板'),('gem','创业板'),('star','科创板'),('bse','北交所'))
+HOME_RANGE_DAYS=3
+ITEM_FIELDS=13
+
+
+def _cutoff(days):
+    """近 N 天窗口的起点（含今天）。"""
+    from datetime import timedelta
+    from .timeutil import today_cn
+    return (today_cn()-timedelta(days=max(1,days)-1)).isoformat()
+
+
+def _entity(s):
+    """实体的 12 元前缀（不含公告数组）。"""
+    anns=s.get('announcements') or []
+    latest=anns[-1] if anns else {}
+    return [s.get('code'),s.get('name'),s.get('board'),1 if s.get('is_st') else 0,
+        s.get('category_id'),s.get('market_cap'),s.get('last_close'),s.get('chg'),
+        s.get('chg5'),s.get('chg_ann'),s.get('price_date'),latest.get('url') or '']
+
+
+def _item(s,anns):
+    """13 元条目：12 元实体 + 公告三元素数组。"""
+    return _entity(s)+[[[a.get('date'),a.get('title'),a.get('category_id')] for a in anns]]
+
+
+def _kline_map(bars):
+    """code -> [[date,open,close,high,low,volume], ...]，最近 bars 根，按日期升序。"""
+    out={}
+    rows=db.conn().execute('''SELECT code,date,open,close,high,low,volume FROM (
+        SELECT *, ROW_NUMBER() OVER(PARTITION BY code ORDER BY date DESC) rn
+        FROM current_klines) WHERE rn<=? ORDER BY code,date''',(bars,))
+    for row in rows:
+        out.setdefault(row['code'],[]).append(
+            [row['date'],row['open'],row['close'],row['high'],row['low'],row['volume']])
+    return out
+
+
+def _csv_cell(value):
+    text='' if value is None else str(value)
+    if any(ch in text for ch in ',"\n\r'):
+        return '"'+text.replace('"','""')+'"'
+    return text
+
+
+def _write_ai_csv(repo_root,items,taxonomy):
+    """DB-B：一行一个 (股票, 公告类型) 对，供 AI 挑池。
+
+    类别写**中文标签** —— AI 零歧义（personnel / restructure / merger 这些英文 id 太像，
+    容易猜错）。只放 code / name / category 三个字段，剩下的 AI 自己去取。
+    """
+    label={t.get('id'):(t.get('label') or t.get('id')) for t in taxonomy}
+    lines=['code,name,category']
+    for s in items:
+        seen=[]
+        for a in (s.get('announcements') or []):
+            cid=a.get('category_id')
+            if cid and cid not in seen:
+                seen.append(cid)
+        for cid in seen:
+            lines.append(','.join([_csv_cell(s.get('code')),_csv_cell(s.get('name')),
+                _csv_cell(label.get(cid,cid))]))
+    path=Path(repo_root)/'ai'/'stocks.csv'
+    path.parent.mkdir(parents=True,exist_ok=True)
+    path.write_text('\n'.join(lines)+'\n',encoding='utf-8')
+    return {'rows':len(lines)-1,'bytes':path.stat().st_size,'path':str(path)}
+
+
+def _write_data_layer(stage,payload,bars,repo_root):
+    """写数据层 v2 的全部产物，返回统计。"""
+    items=payload.get('items') or []
+    taxonomy=payload.get('taxonomy') or []
+    meta_in=dict(payload.get('meta') or {})
+    rng=payload.get('range') or {}
+
+    # 1) 单股详情（K 线 + 全部公告含 URL）
+    klines=_kline_map(bars)
+    stock_root=Path(stage)/'stock'
+    for s in items:
+        code=str(s.get('code') or '')
+        if not code: continue
+        _write_json(stock_root/code[:2]/(code+'.json'),{
+            'v':2,'c':code,'n':s.get('name'),'b':s.get('board'),'st':1 if s.get('is_st') else 0,
+            'cat':s.get('category_id'),'cap':s.get('market_cap'),'p':s.get('last_close'),
+            'ch':s.get('chg'),'ch5':s.get('chg5'),'cha':s.get('chg_ann'),
+            'd':s.get('price_date'),'src':s.get('price_source'),'adj':s.get('adjustment'),
+            'k':klines.get(code,[]),
+            'a':[[a.get('date'),a.get('title'),a.get('category_id'),a.get('url') or ''
+                  ] for a in (s.get('announcements') or [])]})
+
+    # 2) 分板块档（实体 + 窗口内全部公告）
+    counts={'stocks':len(items)}
+    for key,board_name in BOARD_KEYS:
+        subset=[s for s in items if s.get('board')==board_name]
+        counts[key]=len(subset)
+        _write_json(Path(stage)/f'list-{key}.json',
+            {'v':2,'key':key,'count':len(subset),
+             'items':[_item(s,s.get('announcements') or []) for s in subset]})
+    st_subset=[s for s in items if s.get('is_st')]
+    counts['st']=len(st_subset)
+    _write_json(Path(stage)/'list-st.json',
+        {'v':2,'key':'st','count':len(st_subset),
+         'items':[_item(s,s.get('announcements') or []) for s in st_subset]})
+    counts['all']=len(items)
+    _write_json(Path(stage)/'list-all.json',
+        {'v':2,'key':'all','count':len(items),
+         'items':[_item(s,s.get('announcements') or []) for s in items]})
+
+    # 3) 首屏档：主板 + 非ST + 近3天（用户 90% 的用法，一个请求直达）
+    cut=_cutoff(HOME_RANGE_DAYS)
+    home=[]
+    for s in items:
+        if s.get('board')!='主板' or s.get('is_st'): continue
+        anns=[a for a in (s.get('announcements') or []) if (a.get('date') or '')>=cut]
+        if not anns: continue
+        home.append(_item(s,anns))
+    counts['home']=len(home)
+    _write_json(Path(stage)/'home.json',
+        {'v':2,'key':'home','range_days':HOME_RANGE_DAYS,'count':len(home),'items':home})
+
+    # 4) meta（taxonomy 内联，省掉首屏一个请求）
+    _write_json(Path(stage)/'meta.json',{
+        'v':2,'generated_at':meta_in.get('generated_at'),'source':meta_in.get('source'),
+        'mock':meta_in.get('mock'),'range':rng,
+        'latest_announcement':meta_in.get('latest_announcement'),
+        'latest_price':meta_in.get('latest_price'),'run':meta_in.get('run'),
+        'coverage':meta_in.get('coverage'),'kline_bars':bars,
+        'boards':[b for _,b in BOARD_KEYS],'home_range_days':HOME_RANGE_DAYS,
+        'counts':counts,'taxonomy':taxonomy})
+
+    return {'counts':counts,'ai':_write_ai_csv(repo_root,items,taxonomy)}
+
+
+def _reuse_unchanged(old_root,new_root):
+    """把 new_root 中与 old_root 内容相同的文件换成硬链接。
+
+    硬链接后 inode 与 mtime 都不变 → `git add -A` 直接跳过这些文件，
+    解决"每轮全量重建 5000 个单股文件"的 stat/hash 开销。内容不变的 blob
+    本来就不会重复入库（git 按内容寻址），所以仓库也不会因此膨胀。
+    """
+    old_root=Path(old_root); new_root=Path(new_root)
+    reused=0
+    for p in new_root.rglob('*'):
+        if not p.is_file(): continue
+        old=old_root/p.relative_to(new_root)
+        try:
+            if not old.is_file(): continue
+            if old.stat().st_size!=p.stat().st_size: continue
+            if old.read_bytes()!=p.read_bytes(): continue
+            p.unlink()
+            os.link(old,p)
+            reused+=1
+        except OSError:
+            continue
+    return reused
+
+
+def _db_b_root(shell,repo_root=None):
+    """解析 DB-B（`ai/stocks.csv`）的落点 = 数据仓根目录。
+
+    ★ 不能默认 `shell.parent` 就完事：`build_data()` 不传 `site=` 时 shell 是
+      `<代码仓>/dist`，`shell.parent` 就是**代码仓根** —— 会把给 AI 的 CSV 写进源码树，
+      而 cycle 提交的是数据仓，等于白写还污染源码。所以默认值要显式校验，
+      且 cycle 必须把 `repo_dir` 传进来。
+    """
+    shell=Path(shell).resolve()
+    root=Path(repo_root).resolve() if repo_root else shell.parent
+    code=Path(BASE_DIR).resolve()
+    if root==code or root in code.parents or root==shell:
+        raise ValueError('DB-B 落点解析到了源码仓，拒绝写入；请显式传 repo_root')
+    return root
+
+
+def build_data(site=None,days=90,repo_root=None):
+    """生成数据层 docs/data/*.json。这是每轮 cycle 唯一要跑的建站步骤。
+
+    `repo_root` = 数据仓根目录，DB-B 落在它下面的 `ai/stocks.csv`。
+    """
     shell=_safe_shell(site or site_dir())
     shell.mkdir(parents=True,exist_ok=True)
+    root=_db_b_root(shell,repo_root)
     target=shell/DATA_SUBDIR
     with writer_lock():
         db.init_db()
@@ -209,27 +409,20 @@ def build_data(site=None,days=90):
                 payload=board.build_payload(days)
                 bars=int(get_build_config().get('kline_bars',KLINE_BARS))
                 if not 6<=bars<=640: raise ValueError('build.kline_bars 必须在6到640之间')
-                kstats=_write_kline_json(stage,bars)
-                _write_json(stage/'stocks.json',payload['items'])
-                _write_json(stage/'taxonomy.json',payload.get('taxonomy',[]))
-                _write_json(stage/'kline_manifest.json',kstats['manifest'])
-                meta=dict(payload.get('meta',{}))
-                meta['range']=payload.get('range',{})
-                meta['kline_bars']=bars
-                meta['kline_shards']=KLINE_SHARDS
-                _write_json(stage/'meta.json',meta)
+                stats=_write_data_layer(stage,payload,bars,root)
             files={p.relative_to(stage).as_posix():{'sha256':hashlib.sha256(p.read_bytes()).hexdigest(),'size':p.stat().st_size}
                 for p in sorted(stage.rglob('*')) if p.is_file()}
-            _write_json(stage/'artifact.json',{'format':2,'kind':'data',
+            _write_json(stage/'artifact.json',{'format':2,'kind':'data','schema':2,
                 'generated_at':payload['meta']['generated_at'],'files':files,
                 'stocks':len(payload['items']),'source':payload['meta']['source'],'range':payload['range']})
-            # ★ 安装前自检（2026-09-17 补）：stage 校验不过就绝不安装，旧数据层原样保留。
-            #   旧 build() 有 verify_artifact(stage) 这道门，站点固定化改造时漏在了 build_data 里。
-            #   少了它，DB 空 / 分片缺 / 清单对不上时会把半成品数据层直接顶上线。
+            # ★ 安装前自检：stage 校验不过就绝不安装，旧数据层原样保留。
             checked=verify_data_dir(stage)
             if not checked.get('ok'):
                 return {'ok':False,'kind':'data','site':str(target),
                     'error':'数据层自检失败: '+str(checked.get('error'))}
+            # 未变化的文件换硬链接（必须在自检之后：硬链接只改 inode，不改内容）
+            if target.exists():
+                stats['reused']=_reuse_unchanged(target,stage)
             backup=None
             if target.exists():
                 backup=Path(tempfile.mkdtemp(prefix='.board-data-prev-',dir=shell))
@@ -243,25 +436,7 @@ def build_data(site=None,days=90):
             if backup is not None: shutil.rmtree(backup)
             return {'ok':True,'kind':'data','site':str(target),'files':len(files),
                 'bytes':sum(v['size'] for v in files.values()),'stocks':len(payload['items']),
-                'meta':payload['range'],'kline':kstats}
+                'meta':payload['range'],'counts':stats['counts'],'ai':stats['ai'],
+                'reused':stats.get('reused',0)}
         finally:
             if stage.exists(): shutil.rmtree(stage)
-
-
-def _write_kline_json(stage,bars):
-    """K 线分片写成纯 JSON（浏览器 fetch），不再写成 window.ANNO_KLINE_SHARD_n = {...}。"""
-    buckets={i:{} for i in range(KLINE_SHARDS)}
-    rows=db.conn().execute('''SELECT code,date,open,close,high,low,volume FROM (
-        SELECT *, ROW_NUMBER() OVER(PARTITION BY code ORDER BY date DESC) rn
-        FROM current_klines) WHERE rn<=? ORDER BY code,date''',(bars,))
-    for row in rows:
-        buckets[shard_of(row['code'])].setdefault(row['code'],[]).append(
-            [row['date'],row['open'],row['close'],row['high'],row['low'],row['volume']])
-    files={}
-    total=0
-    for n,bucket in buckets.items():
-        name=f'kline_{n}.json'
-        total+=_write_json(Path(stage)/name,bucket)
-        files[str(n)]=name
-    manifest={'shards':KLINE_SHARDS,'codes':sum(len(b) for b in buckets.values()),'bars':bars,'files':files}
-    return {'manifest':manifest,'bytes':total}

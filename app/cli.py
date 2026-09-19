@@ -11,6 +11,7 @@ import argparse
 import json
 import shutil
 import sys
+from pathlib import Path
 from . import board,cycle,db,paths,pipeline,site,store
 from .config import rules_config
 from .locking import writer_lock,BusyError
@@ -69,7 +70,12 @@ def cmd_build_data(args):
     """生成数据层 docs/data/*.json。这是每轮 cycle 唯一要跑的建站步骤。"""
     from .validator import verify_data
     target=args.site or paths.site_dir()
-    result=site.build_data(target,args.days)
+    # DB-B（ai/stocks.csv）落点 = 数据仓根。给了 --site 就取它的父目录；
+    # 都不给时交给 site._db_b_root 报错，绝不默认落到源码仓。
+    repo_root=getattr(args,'repo_root',None)
+    if not repo_root and args.site:
+        repo_root=str(Path(args.site).resolve().parent)
+    result=site.build_data(target,args.days,repo_root=repo_root)
     if result.get('ok'):
         checked=verify_data(target)
         result['verify']=checked
@@ -128,6 +134,8 @@ def main(argv=None):
             p.add_argument('--days',type=int,default=90)
         if cmd in ('build','build-shell','build-data'):
             p.add_argument('--site')
+        if cmd=='build-data':
+            p.add_argument('--repo-root',help='数据仓根目录（DB-B 落点），默认取 --site 的父目录')
         if cmd=='cycle':
             p.add_argument('--data-repo',required=True,help='数据仓库的本地目录')
             p.add_argument('--repo');p.add_argument('--token');p.add_argument('--branch',default='main')

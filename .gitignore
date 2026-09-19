@@ -42,3 +42,7 @@ _secrets/
 backups/
 jobs/
 test-results/
+
+# Function bundle credentials - never commit
+function/secrets.json
+secrets.json

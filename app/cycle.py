@@ -67,7 +67,9 @@ def run(repo_dir, *, mode='incremental', lookback_days=None, max_attempts=2, ret
 
     # ★ 站点固定化改造（2026-09-16）：每轮只更新数据层 docs/data/*.json，
     #   不再重建整个站点外壳。HTML/JS/CSS 由 `app.cli build-shell` 一次性生成后固定。
-    build = site.build_data(site_target, days)
+    # repo_root 显式传数据仓根：DB-B（ai/stocks.csv）必须落在数据仓里被 commit_push 带走，
+    # 不能靠 shell.parent 猜（不传 site= 时那是代码仓根）。
+    build = site.build_data(site_target, days, repo_root=repo_dir)
     steps['build'] = build
     if not build.get('ok'):
         return {'ok': False, 'stage': 'build', 'version': version, 'steps': steps,

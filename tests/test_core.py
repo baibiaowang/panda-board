@@ -259,4 +259,147 @@ class WindowBoardTests(DatabaseCase):
         with self.assertRaises(ValueError): config.validate_config(cfg)
 
 
+class DataLayerV2Tests(DatabaseCase):
+    """数据层 v2（2026-09-19）：build_data() + verify_data_dir() 的契约。
+
+    ★ 改造前这条路径零覆盖 —— 只有已废弃的 build()/verify_artifact() 被测过，
+      所以数据层换了格式也没人拦得住。这组用例就是补这个缺口。
+    """
+
+    def _seed(self, days=3, pool_size=12, ann_per_day=15):
+        end = today_cn().isoformat()
+        start = (today_cn() - timedelta(days=days-1)).isoformat()
+        result = pipeline.run_pipeline('full', start, end,
+                                       source=MockSource(pool_size=pool_size, ann_per_day=ann_per_day))
+        self.assertTrue(result['ok'], result)
+
+    def _build(self):
+        return site.build_data(str(self.base/'site'), 90, repo_root=str(self.base))
+
+    def _read(self, *parts):
+        return json.loads((self.base/'site'/'data').joinpath(*parts).read_text(encoding='utf-8'))
+
+    def test_build_data_installs_and_verifies(self):
+        self._seed()
+        out = self._build()
+        self.assertTrue(out.get('ok'), out)
+        for name in ('meta.json','home.json','artifact.json',
+                     'list-main.json','list-gem.json','list-star.json',
+                     'list-bse.json','list-st.json','list-all.json'):
+            self.assertTrue((self.base/'site'/'data'/name).is_file(), name)
+        meta = self._read('meta.json')
+        self.assertEqual(meta['v'], 2)
+        self.assertEqual(meta['home_range_days'], 3)
+        self.assertTrue(meta['taxonomy'])
+        self.assertEqual(meta['counts']['stocks'], out['stocks'])
+        self.assertEqual(self._read('artifact.json')['schema'], 2)
+        for key in ('main','gem','star','bse','st','all'):
+            obj = self._read(f'list-{key}.json')
+            self.assertEqual(obj['count'], len(obj['items']))
+            self.assertEqual(obj['count'], meta['counts'][key])
+            for entry in obj['items'][:50]:
+                self.assertEqual(len(entry), 13)
+                self.assertIsInstance(entry[12], list)
+                for a in entry[12]:
+                    self.assertEqual(len(a), 3)   # 档位里的公告不带 URL
+        home = self._read('home.json')
+        self.assertEqual(home['count'], len(home['items']))
+        self.assertEqual(home['count'], meta['counts']['home'])
+
+    def test_stock_detail_carries_kline_and_urls(self):
+        self._seed()
+        out = self._build()
+        self.assertTrue(out.get('ok'), out)
+        stocks = sorted((self.base/'site'/'data'/'stock').rglob('*.json'))
+        self.assertEqual(len(stocks), out['stocks'])
+        for p in stocks[:5]:
+            obj = json.loads(p.read_text(encoding='utf-8'))
+            self.assertEqual(obj['v'], 2)
+            self.assertIsInstance(obj['k'], list)
+            self.assertIsInstance(obj['a'], list)
+            for a in obj['a']:
+                self.assertEqual(len(a), 4)   # [date,title,category_id,url]
+
+    def test_verify_data_dir_rejects_tampered_file(self):
+        from app.validator import verify_data_dir
+        self._seed()
+        self.assertTrue(self._build().get('ok'))
+        self.assertTrue(verify_data_dir(self.base/'site'/'data')['ok'])
+        target = self.base/'site'/'data'/'list-main.json'
+        target.write_text(target.read_text(encoding='utf-8')+' ', encoding='utf-8')
+        self.assertFalse(verify_data_dir(self.base/'site'/'data')['ok'])
+
+    def test_empty_home_is_allowed(self):
+        """长假里「近 3 天没有主板非 ST 公告」是合法状态，不能因此让整站停更。"""
+        from app.validator import verify_data_dir
+        old = (today_cn() - timedelta(days=40)).isoformat()
+        # 只在 40 天前那天有公告：展示窗口内仍有数据，但近 3 天一条都没有。
+        store.save_day(DayResult(old, 'mock', [ann(day=old)], 1, 1, True), self.engine)
+        store.save_kline_snapshot('600000', [bar(old)], old)
+        out = self._build()
+        self.assertTrue(out.get('ok'), out)
+        home = self._read('home.json')
+        self.assertEqual(home['count'], 0)
+        self.assertTrue(self._read('list-main.json')['count'] > 0)
+        self.assertTrue(verify_data_dir(self.base/'site'/'data')['ok'])
+
+    def test_ai_csv_lands_in_data_repo_not_code_repo(self):
+        from app.site import _db_b_root
+        self._seed()
+        out = self._build()
+        self.assertTrue(out.get('ok'), out)
+        csv = self.base/'ai'/'stocks.csv'
+        self.assertTrue(csv.is_file())
+        lines = csv.read_text(encoding='utf-8').strip().split('\n')
+        self.assertEqual(lines[0], 'code,name,category')
+        self.assertEqual(out['ai']['rows'], len(lines)-1)
+        # 不给 repo_root 时绝不能默认落到源码仓（否则 CSV 写进源码树、永远推不出去）
+        with self.assertRaises(ValueError):
+            _db_b_root(Path(site.BASE_DIR)/'dist', None)
+
+    def test_db_b_csv_uses_chinese_labels(self):
+        from app.site import _write_ai_csv
+        taxonomy = [{'id':'merger','label':'并购重组'},{'id':'personnel','label':'人事变动'}]
+        items = [{'code':'600000','name':'测试股份',
+                  'announcements':[{'category_id':'merger'},{'category_id':'personnel'},
+                                   {'category_id':'merger'}]}]
+        info = _write_ai_csv(self.base, items, taxonomy)
+        lines = (self.base/'ai'/'stocks.csv').read_text(encoding='utf-8').strip().split('\n')
+        self.assertEqual(lines, ['code,name,category','600000,测试股份,并购重组','600000,测试股份,人事变动'])
+        self.assertEqual(info['rows'], 2)   # 同类只出一行
+
+
+class ShellLayerTests(DatabaseCase):
+    """固定层（build_shell + verify_shell）的回归。
+
+    ★ 这条路径此前零覆盖 —— 只有已废弃的 build()/verify_artifact() 被测过，于是
+      build_shell 把 artifact.json 自己的**过期** sha256 写进清单这件事一直没人
+      拦得住（改完前端跑标准 `cli build-shell` 会报「产物损坏: artifact.json」）。
+      第二次调用是关键：只有此时磁盘上已有上一版 artifact.json，缺陷才会现形。
+    """
+
+    def test_build_shell_is_repeatable_and_self_consistent(self):
+        from app.validator import verify_shell
+        target = self.base/'site'
+        site.build_shell(str(target))
+        first = verify_shell(target)
+        self.assertTrue(first['ok'], first)
+        site.build_shell(str(target))
+        second = verify_shell(target)
+        self.assertTrue(second['ok'], second)
+
+        manifest = json.loads((target/'artifact.json').read_text(encoding='utf-8'))
+        self.assertEqual(manifest['kind'], 'shell')
+        # 清单里绝不能有 artifact.json 自己（自引用 → 覆盖后 sha 必然对不上）
+        self.assertNotIn('artifact.json', manifest['files'])
+        for name in ('index.html', 'dashboard.html', 'dashboard.js',
+                     'lib/echarts.min.js', 'robots.txt', '.nojekyll'):
+            self.assertIn(name, manifest['files'])
+        # 产物全集 = 清单里的文件 + artifact.json 自己
+        actual = {p.relative_to(target).as_posix() for p in target.rglob('*')
+                  if p.is_file() and 'data' not in p.relative_to(target).parts}
+        self.assertEqual(actual, set(manifest['files']) | {'artifact.json'})
+        self.assertEqual(first['bytes'], second['bytes'])
+
+
 if __name__=='__main__': unittest.main()

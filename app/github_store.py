@@ -38,9 +38,31 @@ def _git_env(token: str = ""):
     return env
 
 
-def _git(cwd, *args, token="", timeout=300, check=True):
+# ── git 超时分档 + 关掉自动维护 ────────────────────────────────
+# ★ 2026-09-19 事故（正式跑 FAIL 的根因，详见坑集 agent-pitfalls/domains/pb.md）：
+#   `git commit` 在 5000+ 文件的数据仓上会顺带触发 auto-gc /
+#   `git maintenance run --auto`。这类进程默认 **detach**，却仍**继承着
+#   stdout/stderr 管道**；而 `subprocess.run(capture_output=True)` 要等**所有**
+#   持有管道写端的进程退出才算读到 EOF。于是提交本身早就写完了 ref/reflog，
+#   进程却被后台 gc 拖着不退出 → 撞上统一的 timeout=300 被 SIGTERM 杀掉 →
+#   抛 TimeoutExpired → `commit_push()` 在此中止，**后面的 `git push` 一行没跑**。
+#   （可证：`.git/refs/heads/main` 已是新 sha，远端还停在旧 sha。）
+#
+# 对策两条，缺一不可：
+#   ① `gc.auto=0` + `maintenance.auto=false` —— 从源头掉掉 commit/push 后的
+#      自动维护，命令立刻返回、管道不再被后台进程把持。代价：不再自动打包松散
+#      对象（数据仓每轮是浅克隆，积累有限），需要时另行显式跑 `git gc`。
+#   ② 按操作分档给超时 —— 写整棵工作树 / 走网络的命令天生是分钟级，
+#      不该和 `rev-parse` 共用 300 秒。
+GIT_TIMEOUT_DEFAULT = 300    # 只读、轻量：config / diff --cached / rev-parse
+GIT_TIMEOUT_TREE = 900       # 写工作树或索引：add -A / checkout / reset --hard / commit
+GIT_TIMEOUT_NET = 1800       # 网络传输，可能很大：clone / fetch / push / ls-remote
+
+
+def _git(cwd, *args, token="", timeout=GIT_TIMEOUT_DEFAULT, check=True):
     p = subprocess.run(
-        ["git", "-c", "core.autocrlf=false", *args],
+        ["git", "-c", "core.autocrlf=false",
+         "-c", "gc.auto=0", "-c", "maintenance.auto=false", *args],
         cwd=str(cwd), capture_output=True, text=True, timeout=timeout,
         env=_git_env(token),
     )
@@ -54,15 +76,15 @@ def clone_or_open(repo: str, target: str, token: str = "", branch: str = "main")
         raise ValueError("BOARD_DATA_REPO 必须为 owner/repository")
     root = Path(target).resolve()
     if root.exists() and (root / ".git").is_dir():
-        _git(root, "fetch", "origin", branch, token=token)
-        _git(root, "checkout", "-q", branch, token=token)
-        _git(root, "reset", "--hard", "origin/" + branch, token=token)
+        _git(root, "fetch", "origin", branch, token=token, timeout=GIT_TIMEOUT_NET)
+        _git(root, "checkout", "-q", branch, token=token, timeout=GIT_TIMEOUT_TREE)
+        _git(root, "reset", "--hard", "origin/" + branch, token=token, timeout=GIT_TIMEOUT_TREE)
         return root
     if root.exists() and any(root.iterdir()):
         raise ValueError("数据仓库目录已存在但不是干净的 Git 仓库")
     root.parent.mkdir(parents=True, exist_ok=True)
     _git(root.parent, "clone", "--depth", "1", "--branch", branch,
-         f"https://github.com/{repo}.git", str(root), token=token)
+         f"https://github.com/{repo}.git", str(root), token=token, timeout=GIT_TIMEOUT_NET)
     return root
 
 
@@ -238,17 +260,17 @@ def commit_push(repo_dir: str, repo: str, token: str, message: str, branch: str 
     root = Path(repo_dir).resolve()
     _git(root, "config", "user.name", "panda-board-bot", token=token)
     _git(root, "config", "user.email", "bot@users.noreply.github.com", token=token)
-    _git(root, "add", "-A", token=token)
+    _git(root, "add", "-A", token=token, timeout=GIT_TIMEOUT_TREE)
     diff = _git(root, "diff", "--cached", "--quiet", token=token, check=False)
     if diff.returncode == 0:
         sha = _git(root, "rev-parse", "HEAD", token=token).stdout.strip()
         return {"ok": True, "changed": False, "commit": sha}
     if diff.returncode != 1:
         raise RuntimeError((diff.stderr or diff.stdout)[-1000:])
-    _git(root, "commit", "-m", message, token=token)
-    _git(root, "push", "origin", f"HEAD:refs/heads/{branch}", token=token)
+    _git(root, "commit", "-m", message, token=token, timeout=GIT_TIMEOUT_TREE)
+    _git(root, "push", "origin", f"HEAD:refs/heads/{branch}", token=token, timeout=GIT_TIMEOUT_NET)
     sha = _git(root, "rev-parse", "HEAD", token=token).stdout.strip()
-    remote = _git(root, "ls-remote", "origin", f"refs/heads/{branch}", token=token).stdout.split()[0]
+    remote = _git(root, "ls-remote", "origin", f"refs/heads/{branch}", token=token, timeout=GIT_TIMEOUT_NET).stdout.split()[0]
     if remote != sha:
         raise RuntimeError("GitHub 远端提交与本次提交不一致")
     return {"ok": True, "changed": True, "commit": sha}
