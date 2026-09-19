@@ -188,8 +188,15 @@ def build_shell(site=None):
     shutil.copytree(Path(web_dir())/'lib',lib_dst)
     _write(target/'robots.txt','User-agent: *\nDisallow: /\n')
     _write(target/'.nojekyll','')
+    # ★ 清单必须排除 artifact.json 自己：rglob 扫的是**写入之前**的目录，此刻磁盘上
+    #   还躺着上一版的 artifact.json。把它算进 files，等于在清单里记下自己的**过期**
+    #   sha256，紧接着 _write_json 又把它覆盖掉 → verify_shell 逐文件核对时必然报
+    #   「产物损坏: artifact.json」，于是“改完前端跑一次标准 `cli build-shell`”
+    #   会假失败（2026-09-19 发现）。排除之后 files 只含真正的固定层文件，
+    #   与 validator._verify_manifest 的 `actual == set(files) | {'artifact.json'}` 判据正好对上。
+    manifest_path=target/'artifact.json'
     hashes={p.relative_to(target).as_posix():{'sha256':hashlib.sha256(p.read_bytes()).hexdigest(),'size':p.stat().st_size}
-        for p in sorted(target.rglob('*')) if p.is_file() and DATA_SUBDIR not in p.parts}
+        for p in sorted(target.rglob('*')) if p.is_file() and p!=manifest_path and DATA_SUBDIR not in p.parts}
     _write_json(target/'artifact.json',{'format':2,'kind':'shell',
         'generated_at':board.now_cn().isoformat(),'files':hashes})
     return {'ok':True,'kind':'shell','site':str(target),'files':len(hashes),
