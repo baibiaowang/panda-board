@@ -329,18 +329,41 @@ class DataLayerV2Tests(DatabaseCase):
         target.write_text(target.read_text(encoding='utf-8')+' ', encoding='utf-8')
         self.assertFalse(verify_data_dir(self.base/'site'/'data')['ok'])
 
-    def test_empty_home_is_allowed(self):
-        """长假里「近 3 天没有主板非 ST 公告」是合法状态，不能因此让整站停更。"""
+    def test_home_falls_back_to_recent_data_days(self):
+        """交易日口径：自然日近 3 天没有公告时，首屏回溯到最近有公告的日期，不再假性空窗。"""
         from app.validator import verify_data_dir
         old = (today_cn() - timedelta(days=40)).isoformat()
-        # 只在 40 天前那天有公告：展示窗口内仍有数据，但近 3 天一条都没有。
+        # 只在 40 天前那天有公告：自然日窗口里一条都没有，但它是最近的"数据日"。
         store.save_day(DayResult(old, 'mock', [ann(day=old)], 1, 1, True), self.engine)
         store.save_kline_snapshot('600000', [bar(old)], old)
         out = self._build()
         self.assertTrue(out.get('ok'), out)
         home = self._read('home.json')
-        self.assertEqual(home['count'], 0)
-        self.assertTrue(self._read('list-main.json')['count'] > 0)
+        self.assertEqual(home['count'], 1)
+        self.assertEqual(home['items'][0][12][0][0], old)
+        self.assertTrue(verify_data_dir(self.base/'site'/'data')['ok'])
+
+    def test_home_uses_last_three_data_days(self):
+        """首屏档 = 最近 3 个"有公告的日期"，而不是最近 3 个自然日。"""
+        days = [(today_cn() - timedelta(days=n)).isoformat() for n in (5, 6, 7, 8)]
+        for i, day in enumerate(days):
+            store.save_day(DayResult(day, 'mock', [ann(f'a{i}', day=day, code=f'60000{i}')], 1, 1, True), self.engine)
+        out = self._build()
+        self.assertTrue(out.get('ok'), out)
+        home = self._read('home.json')
+        dates = sorted({a[0] for s in home['items'] for a in s[12]}, reverse=True)
+        self.assertEqual(dates, days[:3])
+
+    def test_empty_home_is_still_allowed(self):
+        """极端情况（主板非 ST 全无公告）下 home 为空仍然合法，不能因此让整站停更。"""
+        from app.validator import verify_data_dir
+        day = today_cn().isoformat()
+        only_gem = RawAnnouncement('x1', '300001', '测试股份', '关于重大资产重组的进展公告', day, '创业板', 100)
+        store.save_day(DayResult(day, 'mock', [only_gem], 1, 1, True), self.engine)
+        out = self._build()
+        self.assertTrue(out.get('ok'), out)
+        self.assertEqual(self._read('home.json')['count'], 0)
+        self.assertTrue(self._read('list-gem.json')['count'] > 0)
         self.assertTrue(verify_data_dir(self.base/'site'/'data')['ok'])
 
     def test_ai_csv_lands_in_data_repo_not_code_repo(self):

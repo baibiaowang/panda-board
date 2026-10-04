@@ -1,6 +1,6 @@
 'use strict';
 /* 数据层 v2（2026-09-19 改造）
-   首屏只拉 meta.json + home.json（主板 + 非ST + 近3天，用户 90% 的用法）；
+   首屏只拉 meta.json + home.json（主板 + 非ST + 最近3个交易日，用户 90% 的用法）；
    切板块/时间范围时按需拉 list-<key>.json；点股票才拉 stock/<前2位>/<code>.json。
    K 线已并入单股文件，不再是 16 个分片（点一只股票从 ~1.8MB 降到 ~7KB）。
 
@@ -44,11 +44,28 @@ function loadJSON(path) {
 function cutoff(n, end = todayCN()) {
   return new Date(Date.parse(end + 'T00:00:00Z') - (n-1)*86400000).toISOString().slice(0,10);
 }
+// ★ 交易日口径（2026-10-04）：窗口按「数据里最近 N 个有公告的日期」回溯，而不是自然日 ——
+//   周末/长假不会出现"近3天全空"的假空窗。窗口只由当前载入档位的全部日期决定，
+//   与分类/搜索/ST 筛选无关（避免筛选后窗口漂移）。
+let _dataDates = [], _dataDatesFor = null;
+function dataDates() {
+  if (_dataDatesFor === items) return _dataDates;
+  const today = todayCN(), seen = new Set();
+  for (const s of items) for (const a of (s[A] || [])) {if (a[0] && a[0] <= today) seen.add(a[0]);}
+  _dataDates = [...seen].sort().reverse();
+  _dataDatesFor = items;
+  return _dataDates;
+}
+function rangeCutoff(n) {
+  const ds = dataDates();
+  return ds.length ? ds[Math.min(n, ds.length) - 1] : cutoff(n);
+}
 function dateMatches(d) {
   if (!d || d > todayCN()) return false;
   if (!activeRange) return true;
-  if (activeRange === '30d+') return d < cutoff(30);
-  return d >= cutoff(Number(activeRange.slice(0,-1)));
+  const ds = dataDates();
+  if (activeRange === '30d+') return ds.length ? (ds.length > 30 && d < ds[29]) : d < cutoff(30);
+  return d >= rangeCutoff(Number(activeRange.slice(0,-1)));
 }
 function matchingAnns(s, query = '') {
   const code = String(s[C] ?? ''), name = String(s[N] ?? '').toLowerCase();
@@ -78,7 +95,7 @@ function renderFilters() {
   $('cats').innerHTML = [...new Set(cats)].map(c => `<button type="button" class="cat${c === activeCat ? ' active' : ''}" data-cat="${esc(c)}">${esc(c)}</button>`).join('');
   $('cats').querySelectorAll('button').forEach(el => el.onclick = () => {activeCat = el.dataset.cat; renderFilters(); renderList();});
   setOptions('boards', [...new Set(['全部板块', ...(meta.boards || ['主板','创业板','科创板','北交所'])])].map(b => [b,b]), activeBoard);
-  setOptions('dranges', [['','窗口内全部'],['3d','近3天'],['7d','近7天'],['15d','近15天'],['30d','近30天'],['30d+','30天之前']], activeRange);
+  setOptions('dranges', [['','窗口内全部'],['3d','近3个交易日'],['7d','近7个交易日'],['15d','近15个交易日'],['30d','近30个交易日'],['30d+','30个交易日之前']], activeRange);
   $('stswitch').checked = showST;
 }
 function clearChart(message, retry) {
@@ -168,7 +185,7 @@ function select(code) {
       if (token !== generation) return;
       const k = (detail || {}).k || [];
       // ★ 公告面板与 K 线标注一律用单股详情里的全窗口公告（detail.a）：
-      //   档位数组（s[A]）只含"当前档位"的公告 —— 首屏走 home 档就只剩近 3 天，
+      //   档位数组（s[A]）只含"当前档位"的公告 —— 首屏走 home 档就只剩最近 3 个交易日，
       //   标注会凭空少一大截。detail.a 是 [date,title,category_id,url] 四元，多一个原文链接。
       const windowAnns = ((detail || {}).a || []).filter(a => a[0] && a[0] <= todayCN());
       const adj = {qfq:'前复权', none:'不复权', unknown:'旧数据口径未核实'}[(detail || {}).adj] || '口径未知';
@@ -227,7 +244,7 @@ function renderQuality() {
   messages.push('分类为标题规则匹配；参考市值取首次成功值。分页校验不代表交易所全覆盖。');
   $('quality').textContent = messages.join(' · ');
 }
-// 档位：home = 主板 + 非ST + 近3天（首屏）；其余按需拉 list-<key>.json
+// 档位：home = 主板 + 非ST + 最近3个交易日（首屏）；其余按需拉 list-<key>.json
 function needKey() {
   if (activeBoard === '主板') return (activeRange === '3d' && !showST) ? 'home' : 'main';
   if (activeBoard === '创业板') return 'gem';
@@ -253,7 +270,7 @@ function bindEvents() {
 }
 async function boot() {
   try {
-    // 首屏固定默认条件：主板 + 近3天 + 非ST（home.json 就是按这个预切好的）。
+    // 首屏固定默认条件：主板 + 最近3个交易日 + 非ST（home.json 就是按这个预切好的）。
     const [metaJson, home] = await Promise.all([
       loadJSON(DATA_DIR + 'meta.json'),
       loadJSON(DATA_DIR + 'home.json'),

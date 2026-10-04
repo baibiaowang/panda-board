@@ -238,7 +238,8 @@ def verify_data_dir(root):
             raise ValueError('home.json 格式无效')
         if home.get('count') != len(home['items']):
             raise ValueError('home.json 的 count 与 items 数不符')
-        # ★ 不要求 home 非空。home = 主板 + 非ST + 近3天，长假期间必然为空 ——
+        # ★ 不要求 home 非空。home = 主板 + 非ST + 最近3个交易日（按"有公告的日期"回溯，
+        #   长假期间会自动取到最近的数据日）；极端情况（主板非ST全无公告）仍可能为空 ——
         #   把它当失败会让 build_data 直接拒绝安装、整站停更（fail-closed 用错了地方）。
         #   真正的「构建有没有干活」由下面的 meta.counts 交叉核对 + stock/ 数量双重兜底。
         counts = meta.get('counts')

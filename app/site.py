@@ -12,6 +12,7 @@ from . import board,db
 from .config import get_build_config,site_title
 from .locking import writer_lock
 from .paths import site_dir,web_dir,data_dir,BASE_DIR
+from .timeutil import today_cn
 from .validator import verify_artifact,verify_data_dir
 
 KLINE_SHARDS=16
@@ -224,13 +225,6 @@ HOME_RANGE_DAYS=3
 ITEM_FIELDS=13
 
 
-def _cutoff(days):
-    """近 N 天窗口的起点（含今天）。"""
-    from datetime import timedelta
-    from .timeutil import today_cn
-    return (today_cn()-timedelta(days=max(1,days)-1)).isoformat()
-
-
 def _entity(s):
     """实体的 12 元前缀（不含公告数组）。"""
     anns=s.get('announcements') or []
@@ -327,12 +321,18 @@ def _write_data_layer(stage,payload,bars,repo_root):
         {'v':2,'key':'all','count':len(items),
          'items':[_item(s,s.get('announcements') or []) for s in items]})
 
-    # 3) 首屏档：主板 + 非ST + 近3天（用户 90% 的用法，一个请求直达）
-    cut=_cutoff(HOME_RANGE_DAYS)
+    # 3) 首屏档：主板 + 非ST + 最近 HOME_RANGE_DAYS 个交易日（用户 90% 的用法，一个请求直达）
+    #    ★ 交易日口径（2026-10-04）：按「最近 N 个有公告的日期」回溯，而不是自然日 ——
+    #      周末/长假期间自然日窗口必然为空，首屏会假性"没有数据"。与前端 dataDates() 同口径。
+    home_subset=[s for s in items if s.get('board')=='主板' and not s.get('is_st')]
+    today=today_cn().isoformat()
+    dates=sorted({(a.get('date') or '') for s in home_subset
+                  for a in (s.get('announcements') or [])
+                  if a.get('date') and a.get('date')<=today},reverse=True)
+    keep=set(dates[:HOME_RANGE_DAYS])
     home=[]
-    for s in items:
-        if s.get('board')!='主板' or s.get('is_st'): continue
-        anns=[a for a in (s.get('announcements') or []) if (a.get('date') or '')>=cut]
+    for s in home_subset:
+        anns=[a for a in (s.get('announcements') or []) if (a.get('date') or '') in keep]
         if not anns: continue
         home.append(_item(s,anns))
     counts['home']=len(home)

@@ -90,6 +90,43 @@ const arg=value=>JSON.stringify(value);
       [ann('2026-09-01','关键词收购','merger'),ann('2026-09-15','立案','penalty')]))},'关键词')`));
     assert.equal(v.length,1);
   });
+  test('交易日口径：近3个交易日=最近3个有数据的日期（无数据日自动跳过）',()=>{
+    run(`items=${arg([
+      item('600001','甲','主板',false,'merger',[ann('2026-09-15','甲公告','merger')]),
+      item('600002','乙','主板',false,'merger',[ann('2026-09-12','乙公告','merger')]),
+      item('600003','丙','主板',false,'merger',[ann('2026-09-11','丙公告','merger')]),
+      item('600004','丁','主板',false,'merger',[ann('2026-09-10','丁公告','merger')])])}`);
+    run("activeBoard='主板';activeCat='全部';showST=false;activeRange='3d'");
+    assert.equal(run('rangeCutoff(3)'),'2026-09-11');
+    assert.equal(run("dateMatches('2026-09-15')"),true);
+    assert.equal(run("dateMatches('2026-09-12')"),true);
+    assert.equal(run("dateMatches('2026-09-11')"),true);
+    assert.equal(run("dateMatches('2026-09-10')"),false);
+  });
+  test('交易日口径：长假里窗口回溯到最近有数据的日子，不再假性空窗',()=>{
+    run(`items=${arg([
+      item('600001','甲','主板',false,'merger',[ann('2026-09-12','甲公告','merger')]),
+      item('600002','乙','主板',false,'merger',[ann('2026-09-11','乙公告','merger')]),
+      item('600003','丙','主板',false,'merger',[ann('2026-09-10','丙公告','merger')])])}`);
+    run("activeRange='3d'");
+    // 今天=09-15：自然日近3天（09-13~09-15）内没有任何数据，交易日窗口仍覆盖到 09-10。
+    assert.equal(run("dateMatches('2026-09-12')"),true);
+    assert.equal(run("dateMatches('2026-09-10')"),true);
+  });
+  test('交易日口径：30个交易日之前=第30个数据日之前的公告',()=>{
+    const many=[];
+    for(let i=0;i<31;i++){
+      const d=new Date(Date.UTC(2026,8,15-i*2)).toISOString().slice(0,10);
+      many.push(item('6000'+String(i).padStart(2,'0'),'股'+i,'主板',false,'merger',[ann(d,'公告','merger')]));
+    }
+    run(`items=${arg(many)}`);
+    run("activeRange='30d+'");
+    const ds=plain(run('dataDates()'));
+    assert.equal(ds.length,31);
+    assert.equal(run(`dateMatches(${arg(ds[28])})`),false);
+    assert.equal(run(`dateMatches(${arg(ds[29])})`),false);
+    assert.equal(run(`dateMatches(${arg(ds[30])})`),true);
+  });
   test('ST过滤对所有板块生效',()=>{
     run(`items=${arg([item('300001','ST测试','创业板',true,'merger',[ann('2026-09-15','测试','merger')])])}`);
     run("activeBoard='创业板';showST=false;activeCat='全部';activeRange='3d'");
