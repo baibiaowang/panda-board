@@ -1,5 +1,18 @@
 # A股公告看板 · 方案3最终修正版
 
+> **用途**：A股公告看板的**程序代码仓**。用 PandaStack 一次性沙箱抓取东财/巨潮公告、K线、市值，
+> 建静态站点后推送到数据仓，由 GitHub Pages 对外发布。
+>
+> **状态**：线上生产。配套数据仓与站点见 [panda-board-data](https://github.com/baibiaowang/panda-board-data)。
+>
+> **配套仓库**：
+> [panda-board-data](https://github.com/baibiaowang/panda-board-data)（数据仓 + 发布源） ·
+> [panda-board-full](https://github.com/baibiaowang/panda-board-full)（备用全量拉取仓）
+>
+> **快速开始**：本地跑通见下方[「本地离线验证」](#本地离线验证)；
+> 日常命令见[「常用命令」](#常用命令)；线上部署与旧库迁移见 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)。
+> 交付边界与未验证项见 [docs/AUDIT.md](docs/AUDIT.md)。
+
 本版为“方案3”：综合方案1旧版与方案2新版后形成的最终修正版。基于两版代码与脱敏运维脚本修复主要业务与部署链路。继续使用 **PandaStack + SQLite + 静态网页**，不改成另一套托管平台。
 
 最重要的部署变化：**一个固定、设置为 persistent 的采集沙箱，独占数据卷；Function 只负责向这个沙箱发起任务。** 禁止继续运行旧的“一轮新建一个挂卷沙箱”脚本。
