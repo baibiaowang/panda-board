@@ -282,7 +282,7 @@ async function boot() {
     items = Array.isArray(home.items) ? home.items : [];
     loadedKey = 'home';
     activeBoard = '主板'; showST = false; activeRange = '3d';
-    activeCat = items.some(s => (s[A] || []).some(a => labelOf[a[2]] === '并购重组')) ? '并购重组' : '全部';
+    activeCat = '全部';
     const requested = new URLSearchParams(location.search).get('stock');
     if (requested && items.some(s => String(s[C]) === requested)) {
       activeCode = requested; activeBoard = '全部板块'; activeCat = '全部'; activeRange = ''; showST = true;
