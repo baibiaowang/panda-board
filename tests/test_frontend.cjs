@@ -26,7 +26,7 @@ const fetchStub=url=>{
   if(url.endsWith('meta.json')) body={v:2,generated_at:'2026-09-15T09:00:00',source:'mock',boards:['主板','创业板','科创板','北交所'],
     counts:{stocks:0},coverage:{window:{start:'2026-09-13',end:'2026-09-15',days:3},covered_days:3,missing_days:[],incomplete_days:[]},
     taxonomy:[{id:'merger',label:'并购重组',color:'#2563eb'},{id:'penalty',label:'立案/处罚',color:'#e6343a'}]};
-  else if(url.endsWith('home.json')) body={v:2,key:'home',range_days:3,count:0,items:[]};
+  else if(url.endsWith('home.json')) body={v:2,key:'home',range_days:3,count:1,items:[['600000','测试','主板',0,'merger',1e9,10,1,2,3,'2026-09-15','',[['2026-09-15','收购公告','merger']]]]};
   else if(url.includes('list-')) body={v:2,key:'main',count:0,items:[]};
   else if(url.includes('stock/')) body={v:2,c:'600000',n:'测试',b:'主板',st:0,k:[],a:[]};
   return Promise.resolve({ok:true,status:200,json:()=>Promise.resolve(body)});
@@ -56,6 +56,7 @@ const arg=value=>JSON.stringify(value);
     assert.equal(run('activeBoard'),'主板');
     assert.equal(run('activeRange'),'3d');
     assert.equal(run('showST'),false);
+    assert.equal(run('activeCat'),'全部','首页有并购重组公告时也不应自动筛掉其他类别');
   });
   test('taxonomy 从 meta.json 内联加载',()=>{
     assert.equal(run("labelOf['merger']"),'并购重组');

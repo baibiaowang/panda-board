@@ -10,12 +10,9 @@
 > [panda-board-full](https://github.com/baibiaowang/panda-board-full)（备用全量拉取仓）
 >
 > **快速开始**：本地跑通见下方[「本地离线验证」](#本地离线验证)；
-> 日常命令见[「常用命令」](#常用命令)；线上部署与旧库迁移见 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)。
-> 交付边界与未验证项见 [docs/AUDIT.md](docs/AUDIT.md)。
+> 日常命令见下方[「常用命令」](#常用命令)。
 
 本版为“方案3”：综合方案1旧版与方案2新版后形成的最终修正版。基于两版代码与脱敏运维脚本修复主要业务与部署链路。继续使用 **PandaStack + SQLite + 静态网页**，不改成另一套托管平台。
-
-最重要的部署变化：**一个固定、设置为 persistent 的采集沙箱，独占数据卷；Function 只负责向这个沙箱发起任务。** 禁止继续运行旧的“一轮新建一个挂卷沙箱”脚本。
 
 ## 新架构（GitHub 数据仓库 + GitHub Pages + 临时 Sandbox）
 
@@ -38,13 +35,6 @@ site/
 ```
 
 采集不完整、建站失败或 Git push 未确认时，不提交新版本；网站继续使用上一版本。
-
-详见 `docs/GITHUB_PANDA_DEPLOY.md`。
-
-## 先看这两份文档
-
-- [审核报告与已知边界](docs/AUDIT.md)：原问题、改法、测试证据、尚未验证的项目。
-- [部署及旧库迁移](docs/DEPLOYMENT.md)：必须先暂停旧任务并备份；不要直接覆盖线上脚本后放任旧定时任务运行。
 
 ## 本地离线验证
 
