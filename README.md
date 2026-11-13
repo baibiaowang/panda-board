@@ -1,6 +1,6 @@
 # A股公告看板 · Panda Board
 
-https://img.shields.io/badge/Python-3.10%2B-3776ab?style=flat-square&logo=python&logoColor=white https://img.shields.io/badge/SQLite-3.25%2B-003b57?style=flat-square&logo=sqlite&logoColor=white https://img.shields.io/badge/PandaStack-Sandbox-ff6b35?style=flat-square https://img.shields.io/badge/GitHub%20Pages-live-2ea44f?style=flat-square&logo=githubpages&logoColor=white
+![Python](https://img.shields.io/badge/Python-3.10%2B-3776ab?style=flat-square) ![SQLite](https://img.shields.io/badge/SQLite-3.25%2B-003b57?style=flat-square) ![License](https://img.shields.io/badge/License-Unspecified-lightgrey?style=flat-square)
 
 **A股公告看板：定时抓取东财 / 巨潮公告、K线、市值，规则分类后生成静态看板，由 GitHub Pages 对外发布。**
 
